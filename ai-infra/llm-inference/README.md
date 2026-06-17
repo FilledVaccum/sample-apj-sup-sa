@@ -2,7 +2,7 @@
 
 End-to-end AWS code samples for deploying open-source LLMs with vLLM:
 
-* **`batch/`** — high-throughput, cost-optimized inference on **AWS Batch + EC2 spot**. Submit a JSONL of prompts, get back a JSONL of completions. Best when you don't need a low-latency endpoint and want to minimize $/1M output tokens. You would go to this folder if you need samples on how to deploy LLMs for bulk inference that can benefit from the cost-savings of spot instances. The notebook also generates a report on the throughput and estimated $/tokens.
+* **`batch/`** — high-throughput, cost-optimized inference on **AWS Batch + EC2 spot**. Submit a JSONL of prompts, get back a JSONL of completions. Best when you don't need a low-latency endpoint and want to minimize $ / 1M output tokens. You would go to this folder if you need samples on how to deploy LLMs for bulk inference that can benefit from the cost-savings of spot instances. The notebook also generates a report on the throughput and estimated $/tokens.
 * **`benchmark/`** — reproducible single-instance vLLM benchmarks across `g5`, `g6`, `g6e`, `g7e`, `p4d`, `p4de`. Helps you pick the right instance family for your model + workload. You would go to this folder if you need samples on running inference benchmark for LLM across several GPU instances in AWS. The notebook generates report that compares throughput and $/tokens across the instance types.
 
 ## Models
