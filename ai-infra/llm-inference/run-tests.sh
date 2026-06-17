@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all four test suites (batch / benchmark / real-time/ecs / sample-data)
+# Run all three test suites (batch / benchmark / sample-data)
 # from the repo root. Exits non-zero on the first failure.
 #
 # Each subpackage has its own conftest.py + pytest config, so they can't be
@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 
 if [[ ! -x "${PYTHON}" ]]; then
-  echo "no venv at ${PYTHON}; create one with python3.11 -m venv .venv && source .venv/bin/activate && pip install -e batch -e benchmark -e real-time/ecs"
+  echo "no venv at ${PYTHON}; create one with python3.11 -m venv .venv && source .venv/bin/activate && pip install -e batch -e benchmark"
   exit 1
 fi
 
@@ -24,8 +24,7 @@ run_suite() {
 
 run_suite "batch"          "batch"
 run_suite "benchmark"      "benchmark"
-run_suite "real-time/ecs"  "real-time/ecs"
 run_suite "sample-data"    "sample-data"
 
 echo
-echo "All four suites passed."
+echo "All three suites passed."

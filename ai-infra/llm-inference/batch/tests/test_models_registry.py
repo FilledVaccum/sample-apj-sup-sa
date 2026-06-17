@@ -87,9 +87,9 @@ def test_llama_4_scout_plans_lift_vllm_startup_timeout(factory: str) -> None:
     must opt up the timeout to cover the full 218 GiB / 50 MiB/s = ~75 min
     worst case + warmup margin.
 
-    Same shape as the real-time/ecs HealthCheck fix (#10) and the CFN waiter
-    fix (#11) — every grace period that wraps the HF weight download must
-    cover the slow path; this is the AWS Batch driver-side equivalent.
+    Same shape as the CFN waiter fix (#11) — every grace period that wraps
+    the HF weight download must cover the slow path; this is the AWS Batch
+    driver-side equivalent.
     """
     pkg = importlib.import_module("models.llama_4_scout_17b")
     plan = getattr(pkg, factory)()
@@ -242,8 +242,8 @@ def test_smoke_test_wait_budget_covers_batch_retries() -> None:
     weight download would TimeoutError the smoke driver before
     attempt 2 finished loading weights — wasting the entire smoke run.
 
-    Same retry-amplified shape as bug #18 (ALB / TG drain vs. LiteLLM
-    num_retries). The fix multiplies the per-attempt budget by the
+    Same retry-amplified shape that shows up whenever a wait budget wraps
+    a retried operation: the fix multiplies the per-attempt budget by the
     same Attempts value the JobDefinition declares.
     """
     smoke_path = (Path(__file__).resolve().parents[1]

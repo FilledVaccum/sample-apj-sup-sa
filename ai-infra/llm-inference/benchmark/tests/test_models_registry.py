@@ -80,9 +80,9 @@ def test_llama_4_scout_experiments_lift_vllm_ready_timeout(exp_id: str) -> None:
     Llama-4-Scout experiments must opt up to cover the worst-case download
     plus warmup margin.
 
-    Same shape as the real-time/ecs HealthCheck fix (#10), the CFN waiter
-    fix (#11), and the batch driver startup-timeout fix (#12) — every grace
-    period that wraps the HF weight download must cover the slow path.
+    Same shape as the CFN waiter fix (#11) and the batch driver
+    startup-timeout fix (#12) — every grace period that wraps the HF
+    weight download must cover the slow path.
     """
     pkg = importlib.import_module("models.llama_4_scout_17b")
     plan = pkg.EXPERIMENTS[exp_id].deployment

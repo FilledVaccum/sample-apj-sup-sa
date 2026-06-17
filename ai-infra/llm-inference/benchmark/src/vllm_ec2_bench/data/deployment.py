@@ -152,9 +152,8 @@ class DeploymentPlan(BaseModel):
             "models up to ~55 GiB (MedGemma-27B). Llama-4-Scout (218 GiB BF16) "
             "needs ~75 min worst case for the HuggingFace download alone, plus "
             "warmup — bump to 5400 for the p4d/p4de plans. Same shape as the "
-            "real-time/ecs HealthCheck and the batch driver "
-            "vllm_startup_timeout_seconds — every layer that wraps the HF "
-            "weight download must cover the slow path."
+            "batch driver vllm_startup_timeout_seconds — every layer that "
+            "wraps the HF weight download must cover the slow path."
         ),
     )
     notes: str = Field(default="", description="Short prose describing the packing.")

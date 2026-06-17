@@ -3,12 +3,11 @@
 End-to-end AWS code samples for deploying open-source LLMs with vLLM:
 
 * **`batch/`** — high-throughput, cost-optimized inference on **AWS Batch + EC2 spot**. Submit a JSONL of prompts, get back a JSONL of completions. Best when you don't need a low-latency endpoint and want to minimize $/1M output tokens. You would go to this folder if you need samples on how to deploy LLMs for bulk inference that can benefit from the cost-savings of spot instances. The notebook also generates a report on the throughput and estimated $/tokens.
-* **`real-time/ecs/`** — low-latency, autoscaling, OpenAI-compatible inference on **Amazon ECS** with **vLLM behind LiteLLM**. Best when you need an always-on endpoint with HTTP autoscaling and SSE streaming. You would go to this folder if you need samples on how to deploy LLMs for real-time inference that can scale.
 * **`benchmark/`** — reproducible single-instance vLLM benchmarks across `g5`, `g6`, `g6e`, `g7e`, `p4d`, `p4de`. Helps you pick the right instance family for your model + workload. You would go to this folder if you need samples on running inference benchmark for LLM across several GPU instances in AWS. The notebook generates report that compares throughput and $/tokens across the instance types.
 
 ## Models
 
-The same eight open-source models run across all three functionalities:
+The same eight open-source models run across both functionalities:
 
 | Model | Notes |
 | --- | --- |
@@ -38,7 +37,7 @@ git clone git@github.com:aws-samples/sample-apj-sup-sa.git
 cd ai-infra/llm-inference
 
 # Pick the path you care about
-cd batch          # or  benchmark  or  real-time/ecs
+cd batch          # or  benchmark
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 jupyter lab
@@ -81,29 +80,20 @@ Example: for **batch on Llama-4-Scout**, open
 | GPT-OSS-20B | [`benchmark/models/gpt_oss_20b/gpt-oss-20b-vllm-ec2-benchmark.ipynb`](benchmark/models/gpt_oss_20b/gpt-oss-20b-vllm-ec2-benchmark.ipynb) |
 | Qwen3-Coder-Next | [`benchmark/models/qwen3_coder_next/qwen3-coder-next-vllm-ec2-benchmark.ipynb`](benchmark/models/qwen3_coder_next/qwen3-coder-next-vllm-ec2-benchmark.ipynb) |
 
-#### Real-time (one shared notebook for all 8 models)
-
-[`real-time/ecs/notebooks/real-time-ecs.ipynb`](real-time/ecs/notebooks/real-time-ecs.ipynb)
-— pick the model in section 1 by editing **one line**:
-
-```python
-MODEL_PKG = "qwen3_8b"   # or any folder name under real-time/ecs/models/
-```
-
 ### Where to change the configuration
 
 | What you want to change | Where to edit |
 |---|---|
-| **Spot/on-demand/ODCR/Capacity-Block** strategy | `batch/models/<model>/batch_plans.py` (`capacity_mode=...` on each `ComputeEnvironment`); `benchmark/models/<model>/experiments.py` (`capacity_strategy=...`); `real-time/ecs/models/<model>/__init__.py` (`capacity_strategy=...` on `SERVICE`) |
+| **Spot/on-demand/ODCR/Capacity-Block** strategy | `batch/models/<model>/batch_plans.py` (`capacity_mode=...` on each `ComputeEnvironment`); `benchmark/models/<model>/experiments.py` (`capacity_strategy=...`) |
 | **Instance type / family** | Same files above (`instance_types=[...]`) |
-| **Tensor / data / pipeline parallelism** | `<scenario>/models/<model>/model_spec.py` for batch+benchmark; `<scenario>/models/<model>/__init__.py` for real-time (`tensor_parallel`, `data_parallel`, `pipeline_parallel`) |
+| **Tensor / data / pipeline parallelism** | `<scenario>/models/<model>/model_spec.py` for batch+benchmark |
 | **vLLM serve flags** (e.g. `--kv-cache-dtype fp8`, `--max-model-len`) | Same files as the strategy row above (`extra_serve_flags=[...]`) |
 | **vLLM startup grace period** (large weight downloads) | `vllm_startup_timeout_seconds` on the same plan/service object |
-| **Concurrency** (requests in flight per container) | `in_flight_per_job` (batch); `request_rate` / autoscaling targets (real-time); LLMeter `clients` (benchmark `experiments.py`) |
+| **Concurrency** (requests in flight per container) | `in_flight_per_job` (batch); LLMeter `clients` (benchmark `experiments.py`) |
 | **Region** | `region=` on the plan/service object — defaults to `us-west-2` |
 | **HF_TOKEN** for gated models (MedGemma, Llama-4-Scout) | Stored at run time in AWS Secrets Manager — the notebook prompts. Never check it into the repo |
 
-The framework code in `batch/src/`, `benchmark/src/`, `real-time/ecs/src/` is **model-agnostic**: you only edit `models/<model>/`.
+The framework code in `batch/src/` and `benchmark/src/` is **model-agnostic**: you only edit `models/<model>/`.
 
 ### Where to put your data
 
@@ -122,7 +112,7 @@ Mirror any of the existing per-model folders under `<scenario>/models/<existing_
 
 ## Running the test suites
 
-Each subpackage (`batch/`, `benchmark/`, `real-time/ecs/`, `sample-data/`) has its own pytest config. To run all four suites sequentially against a shared top-level `.venv`:
+Each subpackage (`batch/`, `benchmark/`, `sample-data/`) has its own pytest config. To run all three suites sequentially against a shared top-level `.venv`:
 
 ```bash
 ./run-tests.sh
@@ -133,7 +123,6 @@ The runner exits non-zero on the first failure.
 ## Costs
 
 * **Batch:** dominated by GPU spot $/hour and total tokens generated. The notebook prints an exact $/1M-output-token after every run, computed by walking each EC2 instance's lifecycle and integrating spot-price segments.
-* **Real-time:** a constant base cost (1 LiteLLM Fargate task plus an ALB plus 1 GPU instance) plus a variable cost that scales with request rate via the autoscaling policy. Tear down the stacks when not in use.
 * **Benchmark:** per-experiment cost ≈ (GPU $/hour) × (model load + load test wall-clock, typically 15–25 minutes).
 * **Sample-data synth:** ~$6.50 once for the full 100K rows.
 
@@ -148,7 +137,6 @@ The runner exits non-zero on the first failure.
 ```
 llm-inference/
 ├── batch/             # AWS Batch + EC2 spot offline inference
-├── real-time/ecs/     # ECS-on-EC2 + LiteLLM real-time endpoint
 ├── benchmark/         # single-instance vLLM benchmarks
 ├── sample-data/       # synthesized prompts (CC0)
 │   ├── travel/

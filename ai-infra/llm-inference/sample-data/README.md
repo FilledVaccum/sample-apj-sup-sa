@@ -1,7 +1,7 @@
 # sample-data/
 
-Generic synthetic sample data used by the `batch/`, `real-time/`, and
-`benchmark/` notebooks.
+Generic synthetic sample data used by the `batch/` and `benchmark/`
+notebooks.
 
 | Domain | Input shape | Task expected of the LLM under test |
 | --- | --- | --- |
