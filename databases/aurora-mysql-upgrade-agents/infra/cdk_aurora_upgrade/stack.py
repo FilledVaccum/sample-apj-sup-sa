@@ -58,6 +58,7 @@ class AuroraUpgradeAgentStack(Stack):
         reports_bucket_name: str,
         agent_names: Mapping[str, str],
         model_id: str,
+        db_secret_arn: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -128,6 +129,16 @@ class AuroraUpgradeAgentStack(Stack):
             iam.PolicyStatement(
                 actions=["cloudwatch:PutMetricData"],
                 resources=["*"],
+            )
+        )
+        # Agents resolve the DB password from Secrets Manager at run time
+        # (the password never travels in the invocation payload). Scope read
+        # access to the customer-provided secret. A 6-char suffix wildcard
+        # covers Secrets Manager's auto-appended suffix when an ARN is given.
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[db_secret_arn, f"{db_secret_arn}-??????"],
             )
         )
 

@@ -100,11 +100,52 @@ def log_token_usage(result, agent_name: str = AGENT_NAME):
 _innodb_status = None
 _query_risk_data = None
 _report_urls = {"s3_url": None, "presigned_url": None}
-# Credentials are populated by invoke() before the LLM runs and are looked up
-# by tools — never passed through the LLM prompt.
+# DB connection settings, populated by invoke() before the LLM runs and looked
+# up by tools — never passed through the LLM prompt. The password is resolved
+# from Secrets Manager (see _load_db_credentials), so it never travels in the
+# invocation payload.
 _credentials: dict = {}
 # Report language, set by invoke() so save_report can localize the disclaimer.
 _report_language: str = "ko"
+
+# TLS: RDS/Aurora global CA bundle baked into the image by the Dockerfile.
+RDS_CA_BUNDLE = "/app/rds-ca-bundle.pem"
+# Connection timeouts (seconds): fail fast on bad endpoint / SG / provisioning.
+_CONNECT_TIMEOUT = 5
+_READ_TIMEOUT = 30
+
+
+def _load_db_credentials(secret_id: str, db_user: str | None = None) -> dict:
+    """Resolve DB credentials from Secrets Manager.
+
+    Expects an RDS-style secret ({"username", "password"} JSON). Returns
+    {"user", "password"}. db_user, if given, overrides the secret's username.
+    The plaintext password never leaves this process or appears in any payload.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client("secretsmanager", region_name=region)
+    raw = client.get_secret_value(SecretId=secret_id)["SecretString"]
+    data = json.loads(raw)
+    return {
+        "user": db_user or data.get("username", "admin"),
+        "password": data["password"],
+    }
+
+
+def _connect(host: str, port: int = 3306):
+    """Open a TLS, timeout-bounded, read-only pymysql connection."""
+    return pymysql.connect(
+        host=host,
+        port=port,
+        user=_credentials.get("user"),
+        password=_credentials.get("password"),
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=_CONNECT_TIMEOUT,
+        read_timeout=_READ_TIMEOUT,
+        ssl_ca=RDS_CA_BUNDLE,
+        ssl_verify_cert=True,
+        init_command="SET SESSION TRANSACTION READ ONLY",
+    )
 
 
 @tool
@@ -122,20 +163,13 @@ def check_performance_schema(host: str, port: int = 3306) -> str:
     logger.info(f"🔧 [{INVOCATION_ID}] TOOL check_performance_schema STARTED - host={host}")
     start_time = time.time()
 
+    connection = None
     try:
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=_credentials.get("user"),
-            password=_credentials.get("password"),
-            cursorclass=pymysql.cursors.DictCursor
-        )
+        connection = _connect(host, port)
 
         with connection.cursor() as cursor:
             cursor.execute("SHOW VARIABLES LIKE 'performance_schema'")
             result = cursor.fetchone()
-
-        connection.close()
 
         if result:
             is_enabled = result['Value'].upper() == 'ON'
@@ -154,15 +188,25 @@ def check_performance_schema(host: str, port: int = 3306) -> str:
                 "message": "Could not retrieve performance_schema status"
             })
 
-    except Exception as e:
+    except pymysql.err.OperationalError as e:
         elapsed = time.time() - start_time
-        error_msg = f"❌ Failed to check performance_schema: {str(e)}"
-        logger.error(f"❌ [{INVOCATION_ID}] TOOL check_performance_schema FAILED - {elapsed:.2f}s - {str(e)}")
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL check_performance_schema DB connection failed - {elapsed:.2f}s - {type(e).__name__}: {e}")
         return json.dumps({
             "status": "error",
             "is_enabled": False,
-            "message": error_msg
+            "message": "Could not connect to the database (check endpoint, security group, TLS, and credentials)."
         })
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL check_performance_schema FAILED - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return json.dumps({
+            "status": "error",
+            "is_enabled": False,
+            "message": f"Failed to check performance_schema: {type(e).__name__}."
+        })
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @tool
@@ -182,14 +226,9 @@ def collect_innodb_status(host: str, port: int = 3306) -> str:
     logger.info(f"🔧 [{INVOCATION_ID}] TOOL collect_innodb_status STARTED - host={host}")
     start_time = time.time()
 
+    connection = None
     try:
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=_credentials.get("user"),
-            password=_credentials.get("password"),
-            cursorclass=pymysql.cursors.DictCursor
-        )
+        connection = _connect(host, port)
 
         with connection.cursor() as cursor:
             # Get MySQL version
@@ -200,8 +239,6 @@ def collect_innodb_status(host: str, port: int = 3306) -> str:
             # Get InnoDB status
             cursor.execute("SHOW ENGINE INNODB STATUS")
             status_result = cursor.fetchone()
-
-        connection.close()
 
         if status_result and 'Status' in status_result:
             _innodb_status = {
@@ -221,11 +258,17 @@ def collect_innodb_status(host: str, port: int = 3306) -> str:
         else:
             return "❌ Failed to get InnoDB status: Empty result"
 
+    except pymysql.err.OperationalError as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_innodb_status DB connection failed - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return "❌ Failed to collect InnoDB status: could not connect to the database (check endpoint, security group, TLS, and credentials)."
     except Exception as e:
         elapsed = time.time() - start_time
-        error_msg = f"❌ Failed to collect InnoDB status: {str(e)}"
-        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_innodb_status FAILED - {elapsed:.2f}s - {str(e)}")
-        return error_msg
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_innodb_status FAILED - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return f"❌ Failed to collect InnoDB status: {type(e).__name__}."
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @tool
@@ -319,20 +362,13 @@ ORDER BY
 LIMIT 100
 """
 
+    connection = None
     try:
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=_credentials.get("user"),
-            password=_credentials.get("password"),
-            cursorclass=pymysql.cursors.DictCursor
-        )
+        connection = _connect(host, port)
 
         with connection.cursor() as cursor:
             cursor.execute(query)
             results = cursor.fetchall()
-
-        connection.close()
 
         # Filter out queries with no risk types or zero risk score
         risky_queries = [r for r in results if r['risk_types'] and r['risk_score'] and r['risk_score'] > 0]
@@ -350,11 +386,17 @@ LIMIT 100
         logger.info(f"✅ [{INVOCATION_ID}] TOOL collect_query_risk_data COMPLETED - {elapsed:.2f}s - {len(risky_queries)} risky queries")
         return result_msg
 
+    except pymysql.err.OperationalError as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_query_risk_data DB connection failed - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return "❌ Failed to collect query risk data: could not connect to the database (check endpoint, security group, TLS, and credentials)."
     except Exception as e:
         elapsed = time.time() - start_time
-        error_msg = f"❌ Failed to collect query risk data: {str(e)}"
-        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_query_risk_data FAILED - {elapsed:.2f}s - {str(e)}")
-        return error_msg
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_query_risk_data FAILED - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return f"❌ Failed to collect query risk data: {type(e).__name__} while querying performance_schema."
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @tool
@@ -532,8 +574,8 @@ async def invoke(payload):
     Expected payload format:
     {
         "blue_host": "mysql-blue.xxx.rds.amazonaws.com",
-        "password": "password",
-        "db_user": "admin",  # optional
+        "db_secret_id": "<Secrets Manager secret name or ARN>",
+        "db_user": "admin",  # optional, overrides secret username
         "s3_bucket": "rds-mysql-upgrade-reports"  # optional
     }
     """
@@ -543,23 +585,30 @@ async def invoke(payload):
 
     # Extract configuration from payload
     blue_host = payload.get("blue_host")
-    password = payload.get("password")
-    db_user = payload.get("db_user", "admin")
+    db_secret_id = payload.get("db_secret_id")
+    db_user = payload.get("db_user")  # optional override of the secret's username
     s3_bucket = payload.get("s3_bucket", "rds-mysql-upgrade-reports")
     language = payload.get("language", "ko")  # "ko" or "en"
     global _report_language
     _report_language = language
     language_directive = build_language_directive(language)
 
-    if not all([blue_host, password]):
+    if not all([blue_host, db_secret_id]):
         return {
             "status": "error",
-            "message": "Missing required configuration: blue_host and password are required"
+            "message": "Missing required configuration: blue_host and db_secret_id are required"
         }
 
-    # Stash credentials for the tools to look up; the LLM never sees them.
+    # Resolve credentials from Secrets Manager; the LLM never sees them.
     global _credentials
-    _credentials = {"user": db_user, "password": password}
+    try:
+        _credentials = _load_db_credentials(db_secret_id, db_user)
+    except Exception as e:
+        logger.error(f"❌ [{INVOCATION_ID}] Failed to load DB credentials from Secrets Manager: {type(e).__name__}")
+        return {
+            "status": "error",
+            "message": "Failed to load DB credentials from Secrets Manager. Check db_secret_id and the runtime role's secretsmanager:GetSecretValue permission."
+        }
 
     # Build agent message for comprehensive analysis
     agent_message = f"""

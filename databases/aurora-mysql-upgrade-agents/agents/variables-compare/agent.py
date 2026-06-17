@@ -6,6 +6,7 @@ LLM analyzes the differences and generates a markdown report
 
 import os
 import re
+import json
 import pymysql
 import logging
 import time
@@ -96,11 +97,52 @@ def log_token_usage(result, agent_name: str = AGENT_NAME):
 _blue_variables = None
 _green_variables = None
 _report_urls = {"s3_url": None, "presigned_url": None}
-# Credentials are populated by invoke() before the LLM runs and are looked up
-# by instance_type inside the tool — never passed through the LLM prompt.
+# DB connection settings, populated by invoke() before the LLM runs — never
+# passed through the LLM prompt. Blue and Green are clones of each other, so a
+# single Secrets Manager secret authenticates both. The password is resolved
+# from Secrets Manager (see _load_db_credentials), never via the payload.
 _credentials: dict = {}
 # Report language, set by invoke() so save_report can localize the disclaimer.
 _report_language: str = "ko"
+
+# TLS: RDS/Aurora global CA bundle baked into the image by the Dockerfile.
+RDS_CA_BUNDLE = "/app/rds-ca-bundle.pem"
+# Connection timeouts (seconds): fail fast on bad endpoint / SG / provisioning.
+_CONNECT_TIMEOUT = 5
+_READ_TIMEOUT = 30
+
+
+def _load_db_credentials(secret_id: str, db_user: str | None = None) -> dict:
+    """Resolve DB credentials from Secrets Manager.
+
+    Expects an RDS-style secret ({"username", "password"} JSON). Returns
+    {"user", "password"}. db_user, if given, overrides the secret's username.
+    The plaintext password never leaves this process or appears in any payload.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client("secretsmanager", region_name=region)
+    raw = client.get_secret_value(SecretId=secret_id)["SecretString"]
+    data = json.loads(raw)
+    return {
+        "user": db_user or data.get("username", "admin"),
+        "password": data["password"],
+    }
+
+
+def _connect(host: str, port: int = 3306):
+    """Open a TLS, timeout-bounded, read-only pymysql connection."""
+    return pymysql.connect(
+        host=host,
+        port=port,
+        user=_credentials.get("user"),
+        password=_credentials.get("password"),
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=_CONNECT_TIMEOUT,
+        read_timeout=_READ_TIMEOUT,
+        ssl_ca=RDS_CA_BUNDLE,
+        ssl_verify_cert=True,
+        init_command="SET SESSION TRANSACTION READ ONLY",
+    )
 
 
 @tool
@@ -122,24 +164,16 @@ def collect_variables(host: str, port: int = 3306,
     logger.info(f"🔧 [{INVOCATION_ID}] TOOL collect_variables STARTED - instance_type={instance_type}, host={host}")
     start_time = time.time()
 
-    creds = _credentials.get(instance_type.lower())
-    if not creds:
-        return f"❌ No credentials registered for instance_type={instance_type}"
+    if not _credentials:
+        return "❌ No credentials loaded"
 
+    connection = None
     try:
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=creds["user"],
-            password=creds["password"],
-            cursorclass=pymysql.cursors.DictCursor
-        )
+        connection = _connect(host, port)
 
         with connection.cursor() as cursor:
             cursor.execute("SHOW VARIABLES")
             results = cursor.fetchall()
-
-        connection.close()
 
         # Convert to dictionary
         variables_dict = {
@@ -160,11 +194,17 @@ def collect_variables(host: str, port: int = 3306,
         logger.info(f"✅ [{INVOCATION_ID}] TOOL collect_variables COMPLETED - {elapsed:.2f}s - {len(variables_dict)} variables")
         return result_msg
 
+    except pymysql.err.OperationalError as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_variables DB connection failed ({instance_type.upper()}) - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return f"❌ Failed to collect variables from {instance_type.upper()}: could not connect to the database (check endpoint, security group, TLS, and credentials)."
     except Exception as e:
         elapsed = time.time() - start_time
-        error_msg = f"❌ Failed to collect variables from {instance_type.upper()}: {str(e)}"
-        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_variables FAILED - {elapsed:.2f}s - {str(e)}")
-        return error_msg
+        logger.error(f"❌ [{INVOCATION_ID}] TOOL collect_variables FAILED ({instance_type.upper()}) - {elapsed:.2f}s - {type(e).__name__}: {e}")
+        return f"❌ Failed to collect variables from {instance_type.upper()}: {type(e).__name__}."
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @tool
@@ -351,10 +391,9 @@ async def invoke(payload):
     Expected payload format:
     {
         "blue_host": "<blue>.cluster-xxxxx.us-east-1.rds.amazonaws.com",
-        "blue_password": "password",
         "green_host": "<green>.cluster-xxxxx.us-east-1.rds.amazonaws.com",
-        "green_password": "password",
-        "db_user": "admin",  # optional
+        "db_secret_id": "<Secrets Manager secret name or ARN>",
+        "db_user": "admin",  # optional, overrides secret username
         "s3_bucket": "aurora-mysql-upgrade-reports",  # optional, for report storage
         "report_mode": "full"  # optional: "full" (default) or "custom_only"
     }
@@ -365,10 +404,9 @@ async def invoke(payload):
 
     # Extract configuration from payload
     blue_host = payload.get("blue_host")
-    blue_password = payload.get("blue_password")
     green_host = payload.get("green_host")
-    green_password = payload.get("green_password")
-    db_user = payload.get("db_user", "admin")
+    db_secret_id = payload.get("db_secret_id")
+    db_user = payload.get("db_user")  # optional override of the secret's username
     s3_bucket = payload.get("s3_bucket", "aurora-mysql-upgrade-reports")
     report_mode = payload.get("report_mode", "full")  # "full" or "custom_only"
     language = payload.get("language", "ko")  # "ko" or "en"
@@ -376,18 +414,23 @@ async def invoke(payload):
     global _report_language
     _report_language = language
 
-    if not all([blue_host, blue_password, green_host, green_password]):
+    if not all([blue_host, green_host, db_secret_id]):
         return {
             "error": "Missing required configuration",
-            "message": "blue_host, blue_password, green_host, and green_password are required"
+            "message": "blue_host, green_host, and db_secret_id are required"
         }
 
-    # Stash credentials for the tools to look up; the LLM never sees them.
+    # Resolve credentials from Secrets Manager; the LLM never sees them.
+    # Blue and Green are clones, so one secret authenticates both.
     global _credentials
-    _credentials = {
-        "blue":  {"user": db_user, "password": blue_password},
-        "green": {"user": db_user, "password": green_password},
-    }
+    try:
+        _credentials = _load_db_credentials(db_secret_id, db_user)
+    except Exception as e:
+        logger.error(f"❌ [{INVOCATION_ID}] Failed to load DB credentials from Secrets Manager: {type(e).__name__}")
+        return {
+            "error": "Secrets Manager error",
+            "message": "Failed to load DB credentials from Secrets Manager. Check db_secret_id and the runtime role's secretsmanager:GetSecretValue permission."
+        }
 
     # Build filter instruction based on report_mode
     filter_instruction = ""

@@ -43,6 +43,32 @@ logger = logging.getLogger(__name__)
 INVOCATION_ID = str(uuid.uuid4())[:8]
 logger.info(f"🔵 ORCHESTRATOR MODULE LOADED - Invocation ID: {INVOCATION_ID}")
 
+
+# TLS: RDS/Aurora global CA bundle baked into the image by the Dockerfile.
+RDS_CA_BUNDLE = "/app/rds-ca-bundle.pem"
+# Connection timeouts (seconds): fail fast on bad endpoint / SG / provisioning.
+_CONNECT_TIMEOUT = 5
+_READ_TIMEOUT = 30
+
+
+def _load_db_credentials(secret_id: str, db_user: str | None = None) -> dict:
+    """Resolve DB credentials from Secrets Manager.
+
+    Expects an RDS-style secret ({"username", "password"} JSON). Returns
+    {"user", "password"}. db_user, if given, overrides the secret's username.
+    The orchestrator uses this only for its own Blue-Green reachability check;
+    sub-agents receive the secret id (not the password) and resolve it themselves.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client("secretsmanager", region_name=region)
+    raw = client.get_secret_value(SecretId=secret_id)["SecretString"]
+    data = json.loads(raw)
+    return {
+        "user": db_user or data.get("username", "admin"),
+        "password": data["password"],
+    }
+
+
 # Supported report languages. Sub-agents receive this verbatim in their payload.
 SUPPORTED_LANGUAGES = ("ko", "en")
 
@@ -111,10 +137,10 @@ MESSAGES = {
     "s5_gen":     {"ko": "요약 텍스트 생성 시작...",
                    "en": "Starting summary text generation..."},
     "missing_fields": {
-        "ko": ("필수 필드가 누락되었습니다: blue_host, green_host, password, "
+        "ko": ("필수 필드가 누락되었습니다: blue_host, green_host, db_secret_id, "
                "green_log_group, error_log_analyzer_arn, variables_compare_arn, "
                "upgrade_readiness_analyzer_arn"),
-        "en": ("Required fields are missing: blue_host, green_host, password, "
+        "en": ("Required fields are missing: blue_host, green_host, db_secret_id, "
                "green_log_group, error_log_analyzer_arn, variables_compare_arn, "
                "upgrade_readiness_analyzer_arn"),
     },
@@ -229,53 +255,54 @@ def check_blue_green_deployment(blue_host: str, green_host: str, password: str,
         "message": ""
     }
 
-    # Test Blue instance
-    try:
-        blue_conn = pymysql.connect(
-            host=blue_host,
+    # TLS + timeout-bounded connection (reused for both instances).
+    def _check_connect(host):
+        return pymysql.connect(
+            host=host,
             port=3306,
             user=username,
-            password=password
+            password=password,
+            connect_timeout=_CONNECT_TIMEOUT,
+            read_timeout=_READ_TIMEOUT,
+            ssl_ca=RDS_CA_BUNDLE,
+            ssl_verify_cert=True,
         )
+
+    # Test Blue instance
+    blue_conn = None
+    try:
+        blue_conn = _check_connect(blue_host)
         with blue_conn.cursor() as cursor:
             cursor.execute("SELECT VERSION()")
             blue_version = cursor.fetchone()[0]
             result["blue_version"] = blue_version
             result["blue_status"] = "connected"
-        blue_conn.close()
         logger.info(f"✅ Blue instance connected: {blue_version}")
     except Exception as e:
         result["blue_status"] = "failed"
-        error_type = type(e).__name__
-        error_msg = str(e)
-        error_details = f"{error_type}: {error_msg}"
-        result["message"] += f"Blue connection failed: {error_details}. "
-        logger.error(f"❌ Blue instance connection failed: {error_details}")
-        logger.error(f"   Exception details: {repr(e)}")
+        result["message"] += f"Blue connection failed: {type(e).__name__}. "
+        logger.error(f"❌ Blue instance connection failed: {type(e).__name__}: {e}")
+    finally:
+        if blue_conn is not None:
+            blue_conn.close()
 
     # Test Green instance
+    green_conn = None
     try:
-        green_conn = pymysql.connect(
-            host=green_host,
-            port=3306,
-            user=username,
-            password=password
-        )
+        green_conn = _check_connect(green_host)
         with green_conn.cursor() as cursor:
             cursor.execute("SELECT VERSION()")
             green_version = cursor.fetchone()[0]
             result["green_version"] = green_version
             result["green_status"] = "connected"
-        green_conn.close()
         logger.info(f"✅ Green instance connected: {green_version}")
     except Exception as e:
         result["green_status"] = "failed"
-        error_type = type(e).__name__
-        error_msg = str(e)
-        error_details = f"{error_type}: {error_msg}"
-        result["message"] += f"Green connection failed: {error_details}. "
-        logger.error(f"❌ Green instance connection failed: {error_details}")
-        logger.error(f"   Exception details: {repr(e)}")
+        result["message"] += f"Green connection failed: {type(e).__name__}. "
+        logger.error(f"❌ Green instance connection failed: {type(e).__name__}: {e}")
+    finally:
+        if green_conn is not None:
+            green_conn.close()
 
     # Determine overall status
     if result["blue_status"] == "connected" and result["green_status"] == "connected":
@@ -378,7 +405,7 @@ def run_error_log_analyzer(log_group_name: str, agent_runtime_arn: str,
 
 
 @tool
-def run_variables_compare(blue_host: str, green_host: str, password: str,
+def run_variables_compare(blue_host: str, green_host: str, db_secret_id: str,
                           agent_runtime_arn: str,
                           username: str = "admin",
                           s3_bucket: str = "rds-mysql-upgrade-reports",
@@ -390,7 +417,7 @@ def run_variables_compare(blue_host: str, green_host: str, password: str,
     Args:
         blue_host: Blue instance hostname
         green_host: Green instance hostname
-        password: Database password
+        db_secret_id: Secrets Manager secret name or ARN
         agent_runtime_arn: Variables Compare agent ARN
         username: Database username
         s3_bucket: S3 bucket for report storage
@@ -409,8 +436,7 @@ def run_variables_compare(blue_host: str, green_host: str, password: str,
         payload = {
             "blue_host": blue_host,
             "green_host": green_host,
-            "blue_password": password,
-            "green_password": password,
+            "db_secret_id": db_secret_id,
             "db_user": username,
             "s3_bucket": s3_bucket,
             "report_mode": "full",
@@ -464,7 +490,7 @@ def run_variables_compare(blue_host: str, green_host: str, password: str,
 
 
 @tool
-def run_upgrade_readiness_analyzer(blue_host: str, password: str,
+def run_upgrade_readiness_analyzer(blue_host: str, db_secret_id: str,
                                     agent_runtime_arn: str,
                                     username: str = "admin",
                                     s3_bucket: str = "rds-mysql-upgrade-reports",
@@ -479,7 +505,7 @@ def run_upgrade_readiness_analyzer(blue_host: str, password: str,
 
     Args:
         blue_host: Blue instance hostname
-        password: Database password
+        db_secret_id: Secrets Manager secret name or ARN
         agent_runtime_arn: Upgrade Readiness Analyzer agent ARN
         username: Database username
         s3_bucket: S3 bucket for report storage
@@ -497,7 +523,7 @@ def run_upgrade_readiness_analyzer(blue_host: str, password: str,
 
         payload = {
             "blue_host": blue_host,
-            "password": password,
+            "db_secret_id": db_secret_id,
             "db_user": username,
             "s3_bucket": s3_bucket,
             "language": language
@@ -579,8 +605,8 @@ async def invoke(payload):
     {
         "blue_host": "mysql-blue.xxx.rds.amazonaws.com",
         "green_host": "mysql-green.xxx.rds.amazonaws.com",
-        "password": "password",
-        "db_user": "admin",  # optional
+        "db_secret_id": "<Secrets Manager secret name or ARN>",
+        "db_user": "admin",  # optional, overrides secret username
         "green_log_group": "/aws/rds/instance/mysql-green/error",
         "error_log_analyzer_arn": "arn:aws:...",
         "variables_compare_arn": "arn:aws:...",
@@ -602,8 +628,8 @@ async def invoke(payload):
     # Extract configuration
     blue_host = payload.get("blue_host")
     green_host = payload.get("green_host")
-    password = payload.get("password")
-    db_user = payload.get("db_user", "admin")
+    db_secret_id = payload.get("db_secret_id")
+    db_user = payload.get("db_user")  # optional override of the secret's username
     green_log_group = payload.get("green_log_group")
     error_log_analyzer_arn = payload.get("error_log_analyzer_arn")
     variables_compare_arn = payload.get("variables_compare_arn")
@@ -614,7 +640,7 @@ async def invoke(payload):
     logger.info(f"🌐 [{INVOCATION_ID}] Report language: {language}")
 
     # Validate required fields
-    if not all([blue_host, green_host, password, green_log_group,
+    if not all([blue_host, green_host, db_secret_id, green_log_group,
                 error_log_analyzer_arn, variables_compare_arn, upgrade_readiness_analyzer_arn]):
         yield {
             "event_type": "error",
@@ -623,6 +649,22 @@ async def invoke(payload):
             "message": m("missing_fields", language)
         }
         return
+
+    # Resolve the password once, in-process, only for the orchestrator's own
+    # reachability check. Sub-agents receive db_secret_id (never the password).
+    try:
+        _orch_creds = _load_db_credentials(db_secret_id, db_user)
+    except Exception as e:
+        logger.error(f"❌ [{INVOCATION_ID}] Failed to load DB credentials from Secrets Manager: {type(e).__name__}")
+        yield {
+            "event_type": "error",
+            "step": 0,
+            "status": "error",
+            "message": "Failed to load DB credentials from Secrets Manager. Check db_secret_id and the runtime role's secretsmanager:GetSecretValue permission.",
+        }
+        return
+    _orch_user = _orch_creds["user"]
+    _orch_password = _orch_creds["password"]
 
     # ============================================================
     # STEP 1: Check Blue-Green Deployment Status
@@ -647,8 +689,8 @@ async def invoke(payload):
     deployment_result_str = check_blue_green_deployment(
         blue_host=blue_host,
         green_host=green_host,
-        password=password,
-        username=db_user
+        password=_orch_password,
+        username=_orch_user
     )
     deployment_result = json.loads(deployment_result_str)
     step1_elapsed = time.time() - step1_start
@@ -749,7 +791,7 @@ async def invoke(payload):
     variables_result_str = run_variables_compare(
         blue_host=blue_host,
         green_host=green_host,
-        password=password,
+        db_secret_id=db_secret_id,
         agent_runtime_arn=variables_compare_arn,
         username=db_user,
         s3_bucket=s3_bucket,
@@ -802,7 +844,7 @@ async def invoke(payload):
 
     readiness_result_str = run_upgrade_readiness_analyzer(
         blue_host=blue_host,
-        password=password,
+        db_secret_id=db_secret_id,
         agent_runtime_arn=upgrade_readiness_analyzer_arn,
         username=db_user,
         s3_bucket=s3_bucket,

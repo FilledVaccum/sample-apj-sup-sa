@@ -39,8 +39,10 @@ QUERY_RISK_SCORER_ARN = os.getenv("QUERY_RISK_SCORER_ARN", "")
 PLAN_DIFF_ARN = os.getenv("PLAN_DIFF_ARN", "")
 BLUE_HOST = os.getenv("BLUE_HOST", "")
 GREEN_HOST = os.getenv("GREEN_HOST", "")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_USER = os.getenv("DB_USER", "admin")
+# DB password lives in Secrets Manager; the agents resolve it at run time.
+# Only the secret id (name or ARN) travels in the payload — never the password.
+DB_SECRET_ID = os.getenv("DB_SECRET_ID", "")
+DB_USER = os.getenv("DB_USER", "")  # optional override of the secret's username
 GREEN_LOG_GROUP = os.getenv("GREEN_LOG_GROUP", "")
 # Report output language: "ko" (default) or "en".
 REPORT_LANGUAGE = (os.getenv("REPORT_LANGUAGE", "ko") or "ko").strip().lower()
@@ -63,7 +65,7 @@ REQUIRED_ENV = {
     "PLAN_DIFF_ARN": PLAN_DIFF_ARN,
     "BLUE_HOST": BLUE_HOST,
     "GREEN_HOST": GREEN_HOST,
-    "DB_PASSWORD": DB_PASSWORD,
+    "DB_SECRET_ID": DB_SECRET_ID,
     "GREEN_LOG_GROUP": GREEN_LOG_GROUP,
 }
 
@@ -419,8 +421,7 @@ def main() -> None:
     payload = {
         "blue_host": BLUE_HOST,
         "green_host": GREEN_HOST,
-        "password": DB_PASSWORD,
-        "db_user": DB_USER,
+        "db_secret_id": DB_SECRET_ID,
         "green_log_group": GREEN_LOG_GROUP,
         "error_log_analyzer_arn": ERROR_LOG_ANALYZER_ARN,
         "variables_compare_arn": VARIABLES_COMPARE_ARN,
@@ -431,6 +432,8 @@ def main() -> None:
         "region": AWS_REGION,
         "language": REPORT_LANGUAGE,
     }
+    if DB_USER:  # optional override of the secret's username
+        payload["db_user"] = DB_USER
     try:
         run_orchestrator(payload, step_slot, terminal_slot)
     except Exception as exc:  # noqa: BLE001

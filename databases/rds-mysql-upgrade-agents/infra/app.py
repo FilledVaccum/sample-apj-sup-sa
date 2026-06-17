@@ -67,6 +67,16 @@ account = _require("CDK_DEFAULT_ACCOUNT")
 region = _require("CDK_DEFAULT_REGION")
 suffix = _resolve_deployment_suffix()
 
+# DB credentials live in Secrets Manager; agents resolve them at run time.
+# DB_SECRET_ID may be a secret name or a full ARN. Build the ARN for the IAM
+# grant (a name maps to arn:...:secret:<name>, with a 6-char suffix wildcard
+# added in the stack to match Secrets Manager's auto-generated suffix).
+db_secret_id = _require("DB_SECRET_ID")
+if db_secret_id.startswith("arn:"):
+    db_secret_arn = db_secret_id
+else:
+    db_secret_arn = f"arn:aws:secretsmanager:{region}:{account}:secret:{db_secret_id}"
+
 app = cdk.App()
 
 RdsMysqlUpgradeAgentStack(
@@ -78,6 +88,7 @@ RdsMysqlUpgradeAgentStack(
     security_group_ids=_split("SECURITY_GROUP_IDS"),
     reports_bucket_name=f"{_require('REPORTS_BUCKET_NAME')}-{suffix}",
     model_id=os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6").strip(),
+    db_secret_arn=db_secret_arn,
     agent_names={
         "orchestrator": os.environ.get(
             "ORCHESTRATOR_NAME", f"rds_mysql_upgrade_orchestrator_{suffix}"

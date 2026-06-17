@@ -40,12 +40,53 @@ logger.info(f"🔵 AGENT MODULE LOADED - Invocation ID: {INVOCATION_ID}")
 app = BedrockAgentCoreApp()
 
 
-# Credentials populated by invoke() before the LLM runs; never passed via prompt.
+# DB connection settings, populated by invoke() before the LLM runs; never
+# passed through the prompt. The password is resolved from Secrets Manager
+# (see _load_db_credentials), so it never travels in the invocation payload.
 _credentials: dict = {}
 # Report language, set by invoke() so save_report can localize the disclaimer.
 _report_language: str = "ko"
 # Risk rows captured by collect_query_risks; consumed by get_top_risks.
 _risk_rows: list[dict] = []
+
+# TLS: RDS/Aurora global CA bundle baked into the image by the Dockerfile.
+RDS_CA_BUNDLE = "/app/rds-ca-bundle.pem"
+# Connection timeouts (seconds): fail fast on bad endpoint / SG / provisioning.
+_CONNECT_TIMEOUT = 5
+_READ_TIMEOUT = 30
+
+
+def _load_db_credentials(secret_id: str, db_user: str | None = None) -> dict:
+    """Resolve DB credentials from Secrets Manager.
+
+    Expects an RDS-style secret ({"username", "password"} JSON). Returns
+    {"user", "password"}. db_user, if given, overrides the secret's username.
+    The plaintext password never leaves this process or appears in any payload.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client("secretsmanager", region_name=region)
+    raw = client.get_secret_value(SecretId=secret_id)["SecretString"]
+    data = json.loads(raw)
+    return {
+        "user": db_user or data.get("username", "admin"),
+        "password": data["password"],
+    }
+
+
+def _connect(host: str, port: int = 3306):
+    """Open a TLS, timeout-bounded, read-only pymysql connection."""
+    return pymysql.connect(
+        host=host,
+        port=port,
+        user=_credentials.get("user"),
+        password=_credentials.get("password"),
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=_CONNECT_TIMEOUT,
+        read_timeout=_READ_TIMEOUT,
+        ssl_ca=RDS_CA_BUNDLE,
+        ssl_verify_cert=True,
+        init_command="SET SESSION TRANSACTION READ ONLY",
+    )
 # Report URLs set by save_report.
 _report_urls = {"s3_url": None, "presigned_url": None, "raw_s3_url": None}
 
@@ -174,18 +215,12 @@ def collect_query_risks(host: str, port: int = 3306) -> str:
     global _risk_rows
     logger.info(f"🔧 [{INVOCATION_ID}] TOOL collect_query_risks STARTED - host={host}")
     start = time.time()
+    connection = None
     try:
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=_credentials.get("user"),
-            password=_credentials.get("password"),
-            cursorclass=pymysql.cursors.DictCursor,
-        )
+        connection = _connect(host, port)
         with connection.cursor() as cursor:
             cursor.execute(RISK_QUERY)
             rows = cursor.fetchall()
-        connection.close()
 
         # Stringify datetime / Decimal so we can JSON-serialize later.
         normalized = []
@@ -207,12 +242,22 @@ def collect_query_risks(host: str, port: int = 3306) -> str:
             f"{elapsed:.2f}s - {len(normalized)} rows"
         )
         return f"✅ Collected {len(normalized)} risk-scored digests from {host}"
+    except pymysql.err.OperationalError as e:
+        elapsed = time.time() - start
+        logger.error(
+            f"❌ [{INVOCATION_ID}] TOOL collect_query_risks DB connection failed - "
+            f"{elapsed:.2f}s - {type(e).__name__}: {e}"
+        )
+        return "❌ collect_query_risks failed: could not connect to the database (check endpoint, security group, TLS, and credentials)."
     except Exception as e:
         elapsed = time.time() - start
         logger.error(
-            f"❌ [{INVOCATION_ID}] TOOL collect_query_risks FAILED - {elapsed:.2f}s - {e}"
+            f"❌ [{INVOCATION_ID}] TOOL collect_query_risks FAILED - {elapsed:.2f}s - {type(e).__name__}: {e}"
         )
-        return f"❌ collect_query_risks failed: {e}"
+        return f"❌ collect_query_risks failed: {type(e).__name__} while querying performance_schema."
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @tool
@@ -376,8 +421,8 @@ async def invoke(payload):
     Expected payload:
     {
         "blue_host": "<blue>.cluster-xxxxx.us-east-1.rds.amazonaws.com",
-        "password":  "<DB password>",
-        "db_user":   "admin",                   # optional
+        "db_secret_id": "<Secrets Manager secret name or ARN>",
+        "db_user":   "admin",                   # optional, overrides secret username
         "top_n":     30,                        # optional
         "s3_bucket": "aurora-mysql-upgrade-reports"  # optional
     }
@@ -387,8 +432,8 @@ async def invoke(payload):
     logger.info(f"📥 [{INVOCATION_ID}] Received payload keys: {list(payload.keys())}")
 
     blue_host = payload.get("blue_host")
-    password = payload.get("password")
-    db_user = payload.get("db_user", "admin")
+    db_secret_id = payload.get("db_secret_id")
+    db_user = payload.get("db_user")  # optional override of the secret's username
     top_n = int(payload.get("top_n", 30))
     s3_bucket = payload.get("s3_bucket", "aurora-mysql-upgrade-reports")
     language = payload.get("language", "ko")  # "ko" or "en"
@@ -396,14 +441,21 @@ async def invoke(payload):
     _report_language = language
     language_directive = build_language_directive(language)
 
-    if not all([blue_host, password]):
+    if not all([blue_host, db_secret_id]):
         return {
             "status": "error",
-            "message": "Missing required configuration: blue_host and password are required",
+            "message": "Missing required configuration: blue_host and db_secret_id are required",
         }
 
     global _credentials
-    _credentials = {"user": db_user, "password": password}
+    try:
+        _credentials = _load_db_credentials(db_secret_id, db_user)
+    except Exception as e:
+        logger.error(f"❌ [{INVOCATION_ID}] Failed to load DB credentials from Secrets Manager: {type(e).__name__}")
+        return {
+            "status": "error",
+            "message": "Failed to load DB credentials from Secrets Manager. Check db_secret_id and the runtime role's secretsmanager:GetSecretValue permission.",
+        }
 
     agent_message = f"""
 {language_directive}

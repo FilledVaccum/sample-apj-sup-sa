@@ -42,10 +42,35 @@ logger.info(f"🔵 AGENT MODULE LOADED - Invocation ID: {INVOCATION_ID}")
 app = BedrockAgentCoreApp()
 
 
-# Credentials populated by invoke() before the LLM runs; never passed via prompt.
+# DB connection settings, populated by invoke() before the LLM runs; never
+# passed through the prompt. The password is resolved from Secrets Manager
+# (see _load_db_credentials), so it never travels in the invocation payload.
 _credentials: dict = {}
 # Report language, set by invoke() so save_report can localize the disclaimer.
 _report_language: str = "ko"
+
+# TLS: RDS/Aurora global CA bundle baked into the image by the Dockerfile.
+RDS_CA_BUNDLE = "/app/rds-ca-bundle.pem"
+# Connection timeouts (seconds): fail fast on bad endpoint / SG / provisioning.
+_CONNECT_TIMEOUT = 5
+_READ_TIMEOUT = 30
+
+
+def _load_db_credentials(secret_id: str, db_user: str | None = None) -> dict:
+    """Resolve DB credentials from Secrets Manager.
+
+    Expects an RDS-style secret ({"username", "password"} JSON). Returns
+    {"user", "password"}. db_user, if given, overrides the secret's username.
+    The plaintext password never leaves this process or appears in any payload.
+    """
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    client = boto3.client("secretsmanager", region_name=region)
+    raw = client.get_secret_value(SecretId=secret_id)["SecretString"]
+    data = json.loads(raw)
+    return {
+        "user": db_user or data.get("username", "admin"),
+        "password": data["password"],
+    }
 # Target queries pulled from Blue's events_statements_history.
 _target_queries: list[dict] = []
 # Per-query EXPLAIN comparison results.
@@ -170,12 +195,22 @@ def log_token_usage(result, agent_name: str = AGENT_NAME):
 
 
 def _connect(host: str, port: int = 3306):
+    """Open a TLS, timeout-bounded, read-only pymysql connection.
+
+    Note: this agent runs EXPLAIN, so it does NOT force a read-only session
+    (some EXPLAIN paths materialize temp tables). Use a least-privilege,
+    read-only monitoring user + the reader endpoint in production instead.
+    """
     return pymysql.connect(
         host=host,
         port=port,
         user=_credentials.get("user"),
         password=_credentials.get("password"),
         cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=_CONNECT_TIMEOUT,
+        read_timeout=_READ_TIMEOUT,
+        ssl_ca=RDS_CA_BUNDLE,
+        ssl_verify_cert=True,
     )
 
 
@@ -189,12 +224,12 @@ def collect_target_queries(host: str, port: int = 3306) -> str:
     global _target_queries
     logger.info(f"🔧 [{INVOCATION_ID}] TOOL collect_target_queries STARTED - host={host}")
     start = time.time()
+    conn = None
     try:
         conn = _connect(host, port)
         with conn.cursor() as cur:
             cur.execute(TARGET_QUERY_SQL)
             rows = cur.fetchall()
-        conn.close()
         # Floats / Decimals → JSON-friendly types.
         normalized = []
         for r in rows:
@@ -214,12 +249,24 @@ def collect_target_queries(host: str, port: int = 3306) -> str:
             f"{elapsed:.2f}s - {len(normalized)} queries"
         )
         return f"✅ Collected {len(normalized)} target SELECT queries from {host}"
+    except pymysql.err.OperationalError as e:
+        # Connection / auth / TLS class — log detail, return a generic message
+        # (no host or driver internals leaked to the LLM output).
+        elapsed = time.time() - start
+        logger.error(
+            f"❌ [{INVOCATION_ID}] TOOL collect_target_queries DB connection failed - "
+            f"{elapsed:.2f}s - {type(e).__name__}: {e}"
+        )
+        return "❌ collect_target_queries failed: could not connect to the database (check endpoint, security group, TLS, and credentials)."
     except Exception as e:
         elapsed = time.time() - start
         logger.error(
-            f"❌ [{INVOCATION_ID}] TOOL collect_target_queries FAILED - {elapsed:.2f}s - {e}"
+            f"❌ [{INVOCATION_ID}] TOOL collect_target_queries FAILED - {elapsed:.2f}s - {type(e).__name__}: {e}"
         )
-        return f"❌ collect_target_queries failed: {e}"
+        return f"❌ collect_target_queries failed: {type(e).__name__} while querying performance_schema."
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @tool
@@ -499,8 +546,8 @@ async def invoke(payload):
     {
         "blue_host":  "<blue>.cluster-xxxxx.us-east-1.rds.amazonaws.com",
         "green_host": "<green>.cluster-xxxxx.us-east-1.rds.amazonaws.com",
-        "password":   "<DB password>",
-        "db_user":    "admin",                   # optional
+        "db_secret_id": "<Secrets Manager secret name or ARN>",
+        "db_user":    "admin",                   # optional, overrides secret username
         "s3_bucket":  "aurora-mysql-upgrade-reports"  # optional
     }
     """
@@ -510,22 +557,29 @@ async def invoke(payload):
 
     blue_host = payload.get("blue_host")
     green_host = payload.get("green_host")
-    password = payload.get("password")
-    db_user = payload.get("db_user", "admin")
+    db_secret_id = payload.get("db_secret_id")
+    db_user = payload.get("db_user")  # optional override of the secret's username
     s3_bucket = payload.get("s3_bucket", "aurora-mysql-upgrade-reports")
     language = payload.get("language", "ko")  # "ko" or "en"
     global _report_language
     _report_language = language
     language_directive = build_language_directive(language)
 
-    if not all([blue_host, green_host, password]):
+    if not all([blue_host, green_host, db_secret_id]):
         return {
             "status": "error",
-            "message": "Missing required configuration: blue_host, green_host, password are required",
+            "message": "Missing required configuration: blue_host, green_host, db_secret_id are required",
         }
 
     global _credentials
-    _credentials = {"user": db_user, "password": password}
+    try:
+        _credentials = _load_db_credentials(db_secret_id, db_user)
+    except Exception as e:
+        logger.error(f"❌ [{INVOCATION_ID}] Failed to load DB credentials from Secrets Manager: {type(e).__name__}")
+        return {
+            "status": "error",
+            "message": "Failed to load DB credentials from Secrets Manager. Check db_secret_id and the runtime role's secretsmanager:GetSecretValue permission.",
+        }
 
     agent_message = f"""
 {language_directive}
