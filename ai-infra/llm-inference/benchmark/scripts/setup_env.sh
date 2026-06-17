@@ -3,8 +3,8 @@
 # setup_env.sh
 #
 # Creates (or refreshes) ./.venv at the project root, installs all Python
-# dependencies needed by the notebooks and helper scripts, and registers a
-# Jupyter kernel named "medgemma-benchmark".
+# dependencies needed by the notebooks and helper scripts, and registers the
+# venv-scoped "python3" Jupyter kernel the notebooks bind to.
 #
 # Usage:
 #   ./scripts/setup_env.sh             # fresh install, default Python 3.11+
@@ -18,8 +18,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
-KERNEL_NAME="vllm-ec2-bench"
-KERNEL_DISPLAY="Python (vllm-ec2-bench)"
 
 RECREATE=0
 for arg in "$@"; do
@@ -84,16 +82,20 @@ python -m pip install -e "${PROJECT_ROOT}[notebook,dev]"
 # ---------------------------------------------------------------------------
 # 4. Register Jupyter kernel
 # ---------------------------------------------------------------------------
-python -m ipykernel install --user \
-  --name "${KERNEL_NAME}" \
-  --display-name "${KERNEL_DISPLAY}"
+# Install the standard "python3" kernel INTO THE VENV (--prefix), not globally
+# (--user). The notebooks request kernelspec name "python3", so this is the
+# spec they bind to. Scoping it to the venv prefix means it points at this
+# venv's interpreter and is discovered when start_jupyter.sh launches from the
+# venv — and it vanishes with the venv instead of lingering in ~/Library/Jupyter
+# as a stale global kernel pointing at an old repo path.
+python -m ipykernel install --prefix "${VENV_DIR}"
 
 echo ""
 echo "------------------------------------------------------------------"
 echo "Setup complete."
 echo ""
 echo "  venv:     ${VENV_DIR}"
-echo "  kernel:   ${KERNEL_NAME}  (display: ${KERNEL_DISPLAY})"
+echo "  kernel:   python3 (Python 3 (ipykernel)) — scoped to the venv"
 echo ""
 echo "Next steps:"
 echo "  1. (Optional) Regenerate sample data (one-time, ~\$6.50 for 100K rows):"

@@ -50,7 +50,7 @@ pytest tests/
 # 3. Launch JupyterLab
 ./scripts/start_jupyter.sh
 # Open notebooks/<model>_batch.ipynb (e.g. qwen3_8b_batch.ipynb)
-# kernel = llm-batch-deploy.
+# kernel = Python 3 (ipykernel).
 ```
 
 The notebook covers: deploy → (one-time) image build → upload inputs →

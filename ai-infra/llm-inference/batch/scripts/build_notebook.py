@@ -1117,10 +1117,17 @@ def build_notebook(c: BatchModelConfig) -> Path:
     nb = {
         "cells": cells(),
         "metadata": {
+            # Use the universal "python3" kernel that ipykernel ships in every
+            # environment, rather than a custom named kernel that would require
+            # out-of-band `ipykernel install` registration pointing at an
+            # absolute, machine-specific .venv path. Launched from the project
+            # venv (per the README), "python3" resolves to that venv's
+            # interpreter; on managed envs (SageMaker Studio, Colab) it maps to
+            # their default kernel. Keeps the notebooks self-contained.
             "kernelspec": {
-                "display_name": "Python (llm-batch-deploy)",
+                "display_name": "Python 3 (ipykernel)",
                 "language": "python",
-                "name": "llm-batch-deploy",
+                "name": "python3",
             },
             "language_info": {"name": "python", "version": "3.11"},
         },

@@ -48,7 +48,7 @@ Starting JupyterLab
 
   project root: ${PROJECT_ROOT}
   bind:         127.0.0.1:${PORT}
-  kernel to use inside the notebook: "Python (vllm-ec2-bench)"
+  kernel to use inside the notebook: "Python 3 (ipykernel)"
 
 When JupyterLab finishes starting, look below for a line like:
 
