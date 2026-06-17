@@ -39,11 +39,24 @@ cd ai-infra/llm-inference
 # Pick the path you care about
 cd batch          # or  benchmark
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e '.[notebook]'   # package + JupyterLab, widgets, and notebook deps
 jupyter lab
 ```
 
+The `[notebook]` extra pulls in JupyterLab plus the libraries the notebooks
+import (see `[project.optional-dependencies]` in each `pyproject.toml`); a plain
+`pip install -e .` installs only the core library and `jupyter lab` will not be
+found. Each subpackage also ships `./scripts/setup_env.sh` (creates the venv,
+installs `.[dev,notebook]`, and registers a Jupyter kernel) and
+`./scripts/start_jupyter.sh` as a one-command alternative.
+
 Then open the appropriate notebook for the model you want to run.
+
+**On a managed notebook environment** (SageMaker Studio, Colab, JupyterHub, the
+VS Code notebook extension) JupyterLab is already running — skip the
+`python -m venv` and `jupyter lab` lines. Just `pip install -e '.[notebook]'`
+into the active kernel's environment, then open the notebook and select that
+kernel.
 
 ## How to use this repo
 
