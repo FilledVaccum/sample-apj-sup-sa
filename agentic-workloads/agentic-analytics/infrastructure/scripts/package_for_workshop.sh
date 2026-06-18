@@ -88,8 +88,10 @@ echo "  topup: psycopg2 layer (layers/psycopg2-py312.zip)"
 mkdir -p "$ASSETS_DIR/layers"
 PSY_BUILD="$TEMP_DIR/psy/python"
 mkdir -p "$PSY_BUILD"
+# x86_64 to match the toolset Lambdas (AWS::Lambda::Function defaults to x86_64;
+# an arm64 wheel fails at import with "No module named 'psycopg2._psycopg'").
 if pip3 install --quiet \
-      --platform manylinux2014_aarch64 --implementation cp --python-version 3.12 \
+      --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
       --only-binary=:all: --target "$PSY_BUILD" "psycopg2-binary==2.9.9" 2>/dev/null; then
     (cd "$TEMP_DIR/psy" && zip -r "$ASSETS_DIR/layers/psycopg2-py312.zip" python > /dev/null)
     echo "    psycopg2 layer built"
