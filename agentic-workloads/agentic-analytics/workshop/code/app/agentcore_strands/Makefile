@@ -36,6 +36,11 @@ STACK       ?= agentic-analytics-agentcore
 TEMPLATE    ?= agentcore-topup-stack.yaml
 POLICY_MODE ?= LOG_ONLY
 
+# CFN needs templates >51,200 bytes staged in S3. The workshop CodeEditor role has
+# s3:* on bedrock-agentcore-* buckets, so we stage there (created on first deploy).
+ACCOUNT_ID  ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+CFN_BUCKET  ?= bedrock-agentcore-cfn-$(ACCOUNT_ID)-$(REGION)
+
 # Agent code zip (CodeBuild source). Must match AgentCodeS3Key in the template.
 AGENT_CODE_KEY ?= agent/agent_code.zip
 
@@ -66,18 +71,38 @@ help:
 	@sed -n '2,18p' $(firstword $(MAKEFILE_LIST)) | sed 's/^# \{0,1\}//'
 
 # ---- deploy: structural CFN changes (uncomment a fence, flip a value) --------
-deploy:
+# The event's assets bucket ($ARTIFACTS_BUCKET) is READ-ONLY to participants, but
+# the agent must WRITE chart PNGs and `make build` must re-upload the agent zip.
+# So we use ONE writable bucket ($CFN_BUCKET, which the CodeEditor role owns via
+# its s3:* on bedrock-agentcore-*): copy the pre-baked Lambda/agent zips into it
+# once, then point the stack's ArtifactsBucket at it (prefix empty). Charts, code
+# reads, and rebuilds all use this single writable bucket.
+deploy: stage-assets
 	@echo "==> Deploying $(STACK) (PolicyMode=$(POLICY_MODE), region=$(REGION))"
 	aws cloudformation deploy \
 	  --template-file $(TEMPLATE) \
 	  --stack-name $(STACK) \
+	  --s3-bucket $(CFN_BUCKET) \
+	  --s3-prefix cfn-staging \
 	  --parameter-overrides \
 	      EnvironmentName=$(ENV_NAME) \
-	      ArtifactsBucket=$(ARTIFACTS_BUCKET) \
-	      ArtifactsPrefix=$(ARTIFACTS_PREFIX) \
+	      ArtifactsBucket=$(CFN_BUCKET) \
+	      ArtifactsPrefix= \
 	      PolicyMode=$(POLICY_MODE) \
 	  --capabilities CAPABILITY_NAMED_IAM \
 	  --region $(REGION)
+
+# Ensure the writable bucket exists and holds the pre-baked zips the stack reads.
+stage-assets:
+	@aws s3api head-bucket --bucket $(CFN_BUCKET) 2>/dev/null || \
+	  { echo "==> creating deploy bucket $(CFN_BUCKET)"; aws s3 mb s3://$(CFN_BUCKET) --region $(REGION); }
+	@echo "==> staging pre-baked assets into s3://$(CFN_BUCKET)/ (from the event assets bucket)"
+	@for k in lambda/datafoundation_lambda.zip lambdas/gateway_interceptor.zip \
+	          lambdas/api_integration_toolset.zip lambdas/custom_sql_toolset.zip \
+	          layers/psycopg2-py312.zip agent/agent_code.zip; do \
+	  aws s3 cp "s3://$(ARTIFACTS_BUCKET)/$(ARTIFACTS_PREFIX)$$k" "s3://$(CFN_BUCKET)/$$k" --region $(REGION) >/dev/null 2>&1 \
+	    && echo "    staged $$k" || echo "    [skip] $$k not in assets (ok if unused)"; \
+	done
 	@echo "==> Done. Run 'make outputs' to see the Gateway URL and Runtime ARN."
 
 # ---- outputs / status -------------------------------------------------------
@@ -102,8 +127,8 @@ build:
 	echo "==> [build] zipping agent code"; \
 	ZIP=$$(mktemp).zip; \
 	zip -j "$$ZIP" unicorn_rental_agent.py unicorn_rental_analytics.sop.md requirements.txt config.env.sample -x '*.pyc' '*__pycache__*' >/dev/null; \
-	echo "==> [build] uploading -> s3://$(ARTIFACTS_BUCKET)/$(ARTIFACTS_PREFIX)$(AGENT_CODE_KEY)"; \
-	aws s3 cp "$$ZIP" "s3://$(ARTIFACTS_BUCKET)/$(ARTIFACTS_PREFIX)$(AGENT_CODE_KEY)" --region $(REGION); \
+	echo "==> [build] uploading -> s3://$(CFN_BUCKET)/$(AGENT_CODE_KEY)"; \
+	aws s3 cp "$$ZIP" "s3://$(CFN_BUCKET)/$(AGENT_CODE_KEY)" --region $(REGION); \
 	rm -f "$$ZIP"; \
 	echo "==> [build] triggering CodeBuild $(ENV_NAME)-agent-build"; \
 	BID=$$(aws codebuild start-build --project-name "$(ENV_NAME)-agent-build" --region $(REGION) --query 'build.id' --output text); \
@@ -157,20 +182,23 @@ voice-deploy:
 	STRANDS_ARN=$$(aws cloudformation describe-stacks --stack-name $(STACK) --region $(REGION) \
 	  --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text); \
 	[ -n "$$STRANDS_ARN" ] || { echo "AgentRuntimeArn not found — deploy the analytics top-up first (make deploy)" >&2; exit 1; }; \
+	aws s3api head-bucket --bucket $(CFN_BUCKET) 2>/dev/null || \
+	  { echo "==> [voice] creating staging bucket $(CFN_BUCKET)"; aws s3 mb s3://$(CFN_BUCKET) --region $(REGION); }; \
 	echo "==> [voice] zipping voice bot from $(VOICE_DIR)"; \
 	ZIP=$$(mktemp).zip; \
 	(cd $(VOICE_DIR) && zip -r "$$ZIP" bot.py analytics_processor.py auth.py pyproject.toml uv.lock -x '*.pyc' '*__pycache__*' '*tests*' >/dev/null); \
-	echo "==> [voice] uploading -> s3://$(ARTIFACTS_BUCKET)/$(ARTIFACTS_PREFIX)$(VOICE_CODE_KEY)"; \
-	aws s3 cp "$$ZIP" "s3://$(ARTIFACTS_BUCKET)/$(ARTIFACTS_PREFIX)$(VOICE_CODE_KEY)" --region $(REGION); \
+	echo "==> [voice] uploading -> s3://$(CFN_BUCKET)/$(VOICE_CODE_KEY)"; \
+	aws s3 cp "$$ZIP" "s3://$(CFN_BUCKET)/$(VOICE_CODE_KEY)" --region $(REGION); \
 	rm -f "$$ZIP"; \
 	echo "==> [voice] deploying $(VOICE_STACK)"; \
 	aws cloudformation deploy \
 	  --template-file $(VOICE_TEMPLATE) \
 	  --stack-name $(VOICE_STACK) \
+	  --s3-bucket $(CFN_BUCKET) --s3-prefix cfn-staging \
 	  --parameter-overrides \
 	      EnvironmentName=$(ENV_NAME) \
-	      ArtifactsBucket=$(ARTIFACTS_BUCKET) \
-	      ArtifactsPrefix=$(ARTIFACTS_PREFIX) \
+	      ArtifactsBucket=$(CFN_BUCKET) \
+	      ArtifactsPrefix= \
 	      VoiceAgentCodeS3Key=$(VOICE_CODE_KEY) \
 	      CognitoUserPoolId=$(COGNITO_POOL) \
 	      CognitoClientId=$(COGNITO_CLIENT) \

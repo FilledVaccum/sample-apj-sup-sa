@@ -294,12 +294,35 @@ Resources:
                 Action: cognito-idp:*
                 Resource: '*'
 
-              # CloudFormation - Read stack outputs for auto-detection
+              # CloudFormation - Read stack outputs for auto-detection (any stack)
               - Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:ListStackResources
+                  - cloudformation:ListStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplateSummary
                 Resource: '*'
+              # CloudFormation - participants deploy the AgentCore top-up + voice
+              # stacks via `make deploy` / `make voice-deploy` (aws cloudformation
+              # deploy = create/update via change sets). Scoped to the workshop's
+              # own stacks. Without this, make deploy fails with
+              # AccessDenied: cloudformation:CreateChangeSet.
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
+                  - cloudformation:ValidateTemplate
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/agentic-analytics-agentcore/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/agentic-analytics-voice/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/awscli-cloudformation-package-deploy-*
 
               # Amplify - Deploy UI
               - Effect: Allow

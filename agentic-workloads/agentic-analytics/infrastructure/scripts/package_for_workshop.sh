@@ -68,6 +68,47 @@ echo "  datafoundation"
 cd "$PROJECT_ROOT/app/agentcore_strands/tools"
 zip -j "$ASSETS_DIR/lambda/prebaked_sql_toolset_lambda.zip" prebaked_sql_toolset_lambda.py > /dev/null
 
+# --- Workshop AgentCore top-up Lambda zips ---------------------------------
+# The participant deploys agentcore-topup-stack.yaml, whose Lambda resources read
+# FIXED S3 keys (the template's parameter defaults). package_and_upload.sh builds
+# these for demo mode with hash-suffixed keys; the workshop top-up needs them at
+# stable keys. Build them here so `make deploy` finds every zip.
+echo "  topup: datafoundation_lambda (DataFoundationLambdaKey)"
+zip -j "$ASSETS_DIR/lambda/datafoundation_lambda.zip" prebaked_sql_toolset_lambda.py > /dev/null
+echo "  topup: api_integration_toolset (ApiIntegLambdaKey)"
+zip -j "$ASSETS_DIR/lambdas/api_integration_toolset.zip" api_integration_toolset_lambda.py > /dev/null
+echo "  topup: custom_sql_toolset (CustomSqlLambdaKey)"
+zip -j "$ASSETS_DIR/lambdas/custom_sql_toolset.zip" custom_sql_toolset_lambda.py > /dev/null
+echo "  topup: gateway_interceptor (InterceptorLambdaKey)"
+zip -j "$ASSETS_DIR/lambdas/gateway_interceptor.zip" "$PROJECT_ROOT/app/agentcore_strands/infra/interceptor_lambda.py" > /dev/null
+
+# psycopg2 layer for the SQL Lambdas (NeedsPsycopg2Layer self-create path expects
+# layers/psycopg2-py312.zip). Build a python3.12 manylinux wheel layer.
+echo "  topup: psycopg2 layer (layers/psycopg2-py312.zip)"
+mkdir -p "$ASSETS_DIR/layers"
+PSY_BUILD="$TEMP_DIR/psy/python"
+mkdir -p "$PSY_BUILD"
+if pip3 install --quiet \
+      --platform manylinux2014_aarch64 --implementation cp --python-version 3.12 \
+      --only-binary=:all: --target "$PSY_BUILD" "psycopg2-binary==2.9.9" 2>/dev/null; then
+    (cd "$TEMP_DIR/psy" && zip -r "$ASSETS_DIR/layers/psycopg2-py312.zip" python > /dev/null)
+    echo "    psycopg2 layer built"
+else
+    echo "    [warn] could not build psycopg2 layer locally; deploy can pass Psycopg2LayerArn instead"
+fi
+
+# Agent code ZIP for the AgentCore Runtime container build (AgentCodeS3Key default
+# agent/agent_code.zip). The top-up's CodeBuild pulls this and builds the image.
+echo "  topup: agent_code (AgentCodeS3Key)"
+mkdir -p "$ASSETS_DIR/agent"
+cd "$PROJECT_ROOT/app/agentcore_strands"
+zip -r "$ASSETS_DIR/agent/agent_code.zip" \
+    unicorn_rental_agent.py \
+    unicorn_rental_analytics.sop.md \
+    requirements.txt \
+    config.env.sample \
+    -x "*.pyc" "*__pycache__*" > /dev/null
+
 # Amplify hosting (with common/ utilities)
 echo "  amplify_hosting"
 AMPLIFY_DIR="$INFRA_DIR/custom-resource-lambdas/amplify_hosting"
