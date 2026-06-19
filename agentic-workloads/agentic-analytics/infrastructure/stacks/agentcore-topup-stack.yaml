@@ -1174,6 +1174,26 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: '*'
+              # Observability: the agent runs under opentelemetry-instrument (see the
+              # Dockerfile CMD) and exports spans to the AgentCore-provided OTLP
+              # collector, which delivers to X-Ray / CloudWatch Transaction Search.
+              # Without these the runtime emits NO agent/LLM spans, so the GenAI
+              # Observability "Agents" view is empty and `agentcore eval` (Step 10)
+              # finds nothing to score. (AgentCore runtime execution-role contract.)
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: bedrock-agentcore
               - Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
@@ -1284,7 +1304,12 @@ Resources:
                   COPY unicorn_rental_agent.py .
                   COPY unicorn_rental_analytics.sop.md .
                   EXPOSE 8080
-                  CMD ["python", "unicorn_rental_agent.py"]
+                  # Launch under opentelemetry-instrument so AgentCore Runtime
+                  # exports agent/LLM spans to CloudWatch (aws/spans) — mirrors
+                  # AgentCore's own build when aws-opentelemetry-distro is present.
+                  # Without it the runtime emits NO spans, so Step 9 shows no agent
+                  # traces and Step 10 `agentcore eval` finds nothing to score.
+                  CMD ["opentelemetry-instrument", "python", "unicorn_rental_agent.py"]
                   DOCKERFILE
                 - docker build -t $ECR_REPO_URI:latest .
             post_build:
@@ -1461,6 +1486,22 @@ Resources:
         AWS_REGION: !Ref AWS::Region
         BEDROCK_MODEL_ID: global.anthropic.claude-opus-4-8
         BYPASS_TOOL_CONSENT: 'true'
+        # --- Observability (OTEL → CloudWatch Transaction Search / aws/spans) ---
+        # These activate the ADOT distro the image installs; the AgentCore Runtime
+        # service injects the OTLP collector endpoint (localhost:4318) + default
+        # resource attributes (incl. cloud.resource_id = runtime/<id>/...) into the
+        # microVM, so we do NOT set OTEL_EXPORTER_OTLP_ENDPOINT. always_on guards the
+        # platform Sampled=0 case that otherwise drops child (model/tool) spans.
+        # Combined with the Dockerfile's `opentelemetry-instrument` CMD + the X-Ray
+        # IAM on AgentRuntimeRole, this is what makes Step 9 show agent traces and
+        # Step 10 `agentcore eval` find spans. VERIFY on first deploy: a span with
+        # cloud.resource_id containing runtime/<id> must appear in aws/spans; if the
+        # service default resource attrs are insufficient, additionally set
+        # OTEL_RESOURCE_ATTRIBUTES=service.name=...,aws.log.group.names=/aws/bedrock-agentcore/runtimes/<id>.
+        AGENT_OBSERVABILITY_ENABLED: 'true'
+        OTEL_PYTHON_DISTRO: aws_distro
+        OTEL_PYTHON_CONFIGURATOR: aws_configurator
+        OTEL_TRACES_SAMPLER: always_on
         GUARDRAIL_ID: !Ref Guardrail
         GUARDRAIL_VERSION: 'DRAFT'
         MEMORY_ID: !GetAtt AgentMemory.MemoryId
