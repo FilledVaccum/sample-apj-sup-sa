@@ -86,11 +86,18 @@ SYSTEM_PROMPT = load_system_prompt()
 
 #### TODO 2.3.2: Create the Agent
 
-Wire the components together. Find `TODO 2.3.2` — replace `None` with an :link[Agent]{href="https://strandsagents.com/latest/user-guide/concepts/agents/agent-loop/" external=true} constructor. Notice how `mcp_client` is included in the tools list alongside `current_datetime` — this is what connects the agent to the Gateway's MCP tools. The Gateway has no toolsets yet (you'll add them in later steps), but the wiring is in place.
+Wire the components together. Find `TODO 2.3.2` — replace `None` with an :link[Agent]{href="https://strandsagents.com/latest/user-guide/concepts/agents/agent-loop/" external=true} constructor. Notice how `mcp_client` is included in the tools list alongside `current_datetime` — this is what connects the agent to the Gateway's MCP tools. The Gateway has no toolsets yet (you'll add them in later steps), but the wiring is in place. Leave `hooks=[]` for now — you'll switch it on in the next TODO.
 
 ::::expand{header="💡 Need help with TODO 2.3.2? Click to see the solution"}
 :::code{language=python showCopyAction=true}
-request_agent = Agent(model=bedrock_model, system_prompt=SYSTEM_PROMPT, tools=[mcp_client, current_datetime], hooks=[], callback_handler=None, state={"actor_id": actor_id, "session_id": runtime_session_id})
+request_agent = Agent(
+    model=bedrock_model,
+    system_prompt=SYSTEM_PROMPT,
+    tools=[mcp_client, current_datetime],
+    hooks=[],
+    callback_handler=None,
+    state={"actor_id": actor_id, "session_id": runtime_session_id},
+)
 :::
 ::::
 
@@ -111,10 +118,14 @@ async def agent_invocation(payload, context):
 
 The **AgentCore Memory** resource is already in the template's baseline — but your agent isn't using it yet. The `MemoryHookProvider` class is already defined in `unicorn_rental_agent.py`: it loads recent conversation history when the agent starts and saves each new message. You just need to wire it into the Agent constructor.
 
-Find `TODO 2.8`:
+Find `TODO 2.8` — it's a **one-line change** to the Agent you just wrote: change `hooks=[]` to `hooks=memory_hooks`.
 
 ::::expand{header="💡 Need help with TODO 2.8? Click to see the solution"}
-Uncomment the `hooks=memory_hooks,` line (the first one) and delete the `hooks=[],` line below it. Guardrails will be added later in Step 8.
+In the `Agent(...)` constructor from TODO 2.3.2, change this one line:
+:::code{language=python showCopyAction=true}
+    hooks=memory_hooks,
+:::
+(replacing `hooks=[]`). `memory_hooks` is already built for you near the top of the file. That's the only change — leave everything else as is.
 ::::
 
 ::alert[**Why memory matters.** AgentCore Runtime is stateless — each invocation starts fresh. Without the memory hook, the agent can't recall what you asked a moment ago. The `MemoryHookProvider` loads the last few turns from the Memory resource on start (`on_agent_initialized`) and saves each new message (`on_message_added`), giving the agent continuity across turns. You'll see this work in the chat UI in Step 3 — ask a question, then a follow-up that refers back to it.]{type="info"}

@@ -243,12 +243,19 @@ async def agent_invocation(payload, context):
         mcp_client = MCPClient(create_transport)
         
         # ====================================================================
-        # TODO 2.3.2 (Step 2): Create the Strands Agent
-        # Replace None with: Agent(model=bedrock_model, system_prompt=SYSTEM_PROMPT, tools=[mcp_client, current_datetime], hooks=[], callback_handler=None, state={"actor_id": actor_id, "session_id": runtime_session_id})
+        # TODO 2.3.2 (Step 2): Create the Strands Agent.
+        #   Replace `None` below with an Agent that wires the pieces together:
+        #     Agent(model=bedrock_model,
+        #           system_prompt=SYSTEM_PROMPT,
+        #           tools=[mcp_client, current_datetime],  # mcp_client = the Gateway's tools
+        #           hooks=[],                               # <-- you'll change this in TODO 2.8
+        #           callback_handler=None,
+        #           state={"actor_id": actor_id, "session_id": runtime_session_id})
         #
-        # TODO 2.8 (Step 2): Change hooks=[] to hooks=memory_hooks to enable memory.
+        # TODO 2.8 (Step 2): Enable memory — change `hooks=[]` above to `hooks=memory_hooks`.
+        #   (memory_hooks is already built for you near the top of this file.)
         # ====================================================================
-        request_agent = None  # TODO 2.2.2: Replace with Agent(...)
+        request_agent = None  # TODO 2.3.2: replace with Agent(...)
         
         async for event in request_agent.stream_async(enhanced_prompt):
             yield event
