@@ -1448,12 +1448,106 @@ Resources:
   #============================================================================
   # AgentCore Runtime (Container mode — pre-built image, fast cold start)
   #============================================================================
+  # ==========================================================================
+  # Model subscription — accept the Bedrock Marketplace agreement for the agent's
+  # model at deploy time, so the runtime can invoke it. Fresh sandbox accounts do
+  # NOT come pre-subscribed to every model; without this, ConverseStream fails with
+  # "not authorized to perform aws-marketplace:Subscribe ... to enable access to
+  # this model" and the agent errors on every turn. Idempotent: no-op if already
+  # AVAILABLE. Best-effort (never fails the stack — a model that needs no agreement
+  # simply has no offer).
+  # ==========================================================================
+  ModelSubscriptionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-model-subscription-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ModelSubscriptionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:GetFoundationModelAvailability
+                  - bedrock:ListFoundationModelAgreementOffers
+                  - bedrock:CreateFoundationModelAgreement
+                  - aws-marketplace:ViewSubscriptions
+                  - aws-marketplace:Subscribe
+                Resource: '*'
+
+  ModelSubscriptionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-model-subscription
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ModelSubscriptionRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3, json, time, urllib.request
+          def send(event, context, status, reason=None):
+              body = json.dumps({'Status': status, 'Reason': (reason or 'OK')[:300],
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'model-subscription'),
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'], 'Data': {}})
+              urllib.request.urlopen(urllib.request.Request(event['ResponseURL'],
+                  data=body.encode(), headers={'Content-Type': ''}, method='PUT'))
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  send(event, context, 'SUCCESS'); return
+              try:
+                  # ModelIds: comma-separated BASE model ids (e.g. anthropic.claude-sonnet-4-6),
+                  # NOT the global./us. inference-profile ids.
+                  ids = [m.strip() for m in event['ResourceProperties'].get('ModelIds','').split(',') if m.strip()]
+                  br = boto3.client('bedrock')
+                  for mid in ids:
+                      try:
+                          st = br.get_foundation_model_availability(modelId=mid)['agreementAvailability']['status']
+                      except Exception as e:
+                          print(f'{mid}: availability check failed ({e}); attempting subscribe anyway'); st = 'NOT_AVAILABLE'
+                      if st == 'AVAILABLE':
+                          print(f'{mid}: already AVAILABLE'); continue
+                      offers = br.list_foundation_model_agreement_offers(modelId=mid).get('offers', [])
+                      if not offers:
+                          print(f'{mid}: no agreement offer (no subscription needed)'); continue
+                      br.create_foundation_model_agreement(modelId=mid, offerToken=offers[0]['offerToken'])
+                      print(f'{mid}: agreement submitted')
+                      for _ in range(20):
+                          time.sleep(6)
+                          if br.get_foundation_model_availability(modelId=mid)['agreementAvailability']['status'] == 'AVAILABLE':
+                              print(f'{mid}: now AVAILABLE'); break
+                  send(event, context, 'SUCCESS')
+              except Exception as e:
+                  # Best-effort: do not block the stack on a subscription hiccup.
+                  print(f'model subscription warning: {e}')
+                  send(event, context, 'SUCCESS', reason=f'best-effort: {e}')
+
+  ModelSubscription:
+    Type: Custom::ModelSubscription
+    DependsOn:
+      - ModelSubscriptionFunction
+    Properties:
+      ServiceToken: !GetAtt ModelSubscriptionFunction.Arn
+      # Base model id behind the global.anthropic.claude-opus-4-6-v1 inference profile.
+      ModelIds: anthropic.claude-opus-4-6-v1
+
   AgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     DependsOn:
       - AgentRuntimeRole
       - BuildTrigger
       - ChartCodeInterpreter
+      - ModelSubscription
     Properties:
       AgentRuntimeName: agentic_analytics_agent
       Description: Strands agent for Agentic Analytics demo
@@ -1484,10 +1578,12 @@ Resources:
       EnvironmentVariables:
         GATEWAY_URL: !GetAtt Gateway.GatewayUrl
         AWS_REGION: !Ref AWS::Region
-        # Opus 4.6: Opus 4.8/4.7 require account Containment Score >=350 to invoke
-        # (a gate separate from model access); fresh Workshop Studio sandbox accounts
-        # start below that, so 4.8 is AccessDenied for participants. 4.6-v1 has no
-        # C-Score gate and works in every fresh account.
+        # Model: the base id (anthropic.claude-opus-4-6-v1) is subscribed at deploy
+        # time by the ModelSubscription custom resource above — fresh sandbox accounts
+        # are NOT pre-subscribed to every Bedrock model, and without that the runtime
+        # gets AccessDenied ("aws-marketplace:Subscribe ... to enable access to this
+        # model") on every turn. AgentRuntime DependsOn ModelSubscription, so the
+        # agreement is accepted before the runtime can be invoked.
         BEDROCK_MODEL_ID: global.anthropic.claude-opus-4-6-v1
         BYPASS_TOOL_CONSENT: 'true'
         # --- Observability (OTEL → CloudWatch Transaction Search / aws/spans) ---
