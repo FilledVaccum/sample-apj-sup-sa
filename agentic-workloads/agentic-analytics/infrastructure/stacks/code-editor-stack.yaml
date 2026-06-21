@@ -289,6 +289,18 @@ Resources:
                 Action: bedrock-agentcore:*
                 Resource: '*'
 
+              # Voice lab (optional) - the voice stack creates an API Gateway
+              # HTTP API (the JWT signaling proxy) and uses Kinesis Video Streams
+              # managed WebRTC TURN for media. Without apigateway + kinesisvideo,
+              # `make voice-deploy` rolls back with AccessDenied on apigateway:POST
+              # (SignalingHttpApi) and on the KVS signaling channel.
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                  - execute-api:*
+                  - kinesisvideo:*
+                Resource: '*'
+
               # Cognito - Full access for Gateway auth setup
               - Effect: Allow
                 Action: cognito-idp:*

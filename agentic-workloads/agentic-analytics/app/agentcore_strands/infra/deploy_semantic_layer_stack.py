@@ -430,7 +430,11 @@ def deploy_runtime(gateway_url):
 
     # Try to extract runtime ARN from deploy stdout first.
     # The agentcore CLI output contains box-drawing characters (│, ╭, ╰, etc.)
-    # so we use a strict regex that only matches ARN-valid characters.
+    # and wraps long lines INSIDE the box border — so an ARN printed in a box can
+    # be split across visual lines, leaving the regex with only the pre-wrap
+    # fragment (e.g. ".../runtime/unicorn_rental_sema"). Accept the stdout match
+    # only if it ends with the full "<RUNTIME_AGENT_NAME>-<suffix>" id; otherwise
+    # fall through to the authoritative API lookup in _get_runtime_arn().
     import re
     runtime_arn = None
     if result.stdout:
@@ -438,9 +442,15 @@ def deploy_runtime(gateway_url):
             print(f"   {line}")
             match = re.search(r'(arn:aws:bedrock-agentcore:[a-zA-Z0-9\-]+:\d+:runtime/[a-zA-Z0-9_\-]+)', line)
             if match:
-                runtime_arn = match.group(1)
+                candidate = match.group(1)
+                # Guard against box-wrapped truncation: the runtime id must be
+                # the agent name PLUS the AgentCore-assigned "-XXXXXXXXXX" suffix.
+                rid = candidate.rsplit('/', 1)[-1]
+                if re.match(rf'^{re.escape(RUNTIME_AGENT_NAME)}-[A-Za-z0-9]+$', rid):
+                    runtime_arn = candidate
 
-    # Fallback: get ARN via agentcore list
+    # Fallback (also used when stdout only had a truncated/wrapped ARN): the
+    # authoritative source is the control-plane list, never the box-drawn stdout.
     if not runtime_arn:
         runtime_arn = _get_runtime_arn()
 
