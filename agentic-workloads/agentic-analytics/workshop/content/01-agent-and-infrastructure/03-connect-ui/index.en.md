@@ -80,7 +80,7 @@ You can now view the app in the browser.
   Local:            http://localhost:3001
 ```
 
-Wait for a momment and the `npm start` above should trigger a new browser tab open with the UI. Check if your browser is prompting you whether it is allowed to open a pop up.
+Wait a moment — the `npm start` above should open a new browser tab with the UI. Check whether your browser is prompting you to allow a pop-up.
 
 Alternatively, open a new browser tab and navigate to your Code Editor URL, replacing the path with `/app`:
 

@@ -99,14 +99,14 @@ Open :code[unicorn_rental_analytics.sop.md]{showCopyAction=true} and review:
 
 ### Step 5.4: Test It
 
-Booking creation requires an staff role. In the chat UI, log in as:
+Booking creation requires a staff or admin role. In the chat UI, log in as:
 
 | Field | Value |
 |-------|-------|
 | Username | `stella.moonbeam@example-mythicalunicorns.com` |
 | Password | `Unicorn123!` |
 
-::alert[**Use the right user:** In case you intend to run the below queries after deploying the AgentCore Policy and RLS in step 7, you MUST use users with "staff" or "rental_admin" or "saas_admin" type to be able to use the create booking tool. The user above (Stella Moonbeam) is an staff. If you run this step before deploying the components in step 7, the user does not matter.]{type="info"}
+::alert[**Use the right user:** In case you intend to run the below queries after deploying the AgentCore Policy and RLS in step 7, you MUST use users with "staff" or "rental_admin" or "saas_admin" type to be able to use the create booking tool. The user above (Stella Moonbeam) is a staff member. If you run this step before deploying the components in step 7, the user does not matter.]{type="info"}
 
 ::alert[**Start fresh:** It is best to clear the chatbot conversation from the previous step by clicking the small bin icon next to the chat input field or by refreshing the application demo browser tab.]{type="info"}
 

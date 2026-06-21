@@ -47,7 +47,24 @@ User logs in → Cognito JWT (custom:role [for role-based access control], custo
 
 ## Lab Procedures
 
-### Step 7.1: Add Cedar Policies (TODO 7.1)
+::alert[**This is the most involved step in the workshop — go slow, and don't rush the deploys.** Every step until now was "uncomment one fence, `make deploy`." This one has more moving parts, so it's organized into two halves. Do **Part A** fully (deploy + test) before starting **Part B**.
+
+- **Part A — Tool access (who can call what):** add Cedar policies → deploy in log-only mode → switch to enforce → test (Steps 7.1, 7.6, 7.8).
+- **Part B — Data isolation (who sees which rows):** flip the RLS switch → understand the interceptor → test cross-tenant isolation (Steps 7.2–7.5, 7.7).
+
+The two halves are independent — Part A controls *which tools* a role can call; Part B controls *which rows* a query returns. You'll prove each one separately.]{type="info"}
+
+### A 60-second primer on Cedar (read before 7.1)
+
+You're about to write your first :link[Cedar]{href="https://www.cedarpolicy.com/"} policies, so here's the whole idea in a paragraph. **Cedar is a policy language** (the same engine behind Amazon Verified Permissions) that answers one question — *"is this principal allowed to do this action on this resource?"* — with **formal logic, not an LLM judgment call.** Three things to know and you can read every policy in this step:
+
+- It is **default-deny**: if nothing explicitly `permit`s an action, it's denied.
+- **`forbid` always beats `permit`.** So the usual pattern is one broad `permit` (allow everything) plus narrow `forbid`s that carve out exceptions. That's exactly what you'll deploy: *permit all tools, then forbid the booking tool for analysts and the Custom-SQL tools for staff.*
+- A policy reads almost like English: `forbid(principal, action == "create_booking", resource) when { principal.getTag("custom:role") == "analyst" };` — "forbid the create-booking action when the caller's role is analyst."
+
+Why not just tell the agent in the prompt "don't let analysts book"? Because a prompt is a *suggestion* an attacker can talk the model out of (prompt injection). Cedar is evaluated at the **Gateway, before the agent runs** — the analyst's session literally never sees the tool. That's the difference between application-level and infrastructure-level security, and it's the whole point of this step.
+
+### Step 7.1: Add Cedar Policies (TODO 7.1) — *Part A: tool access*
 
 ::alert[**Complete Steps 4, 5, and 6 first.** Two of the Cedar policies guard tools from those steps — `ForbidWriteAnalystPolicy` depends on the Step-5 booking target and `ForbidCustomSqlStaffPolicy` on the Step-6 Custom SQL target. If you uncomment Step 7a before those targets exist, `make deploy` fails with `Unresolved resource dependencies [ApiIntegTarget]` (or `[CustomSqlTarget]`). Deploy the toolset steps in order, then return here.]{type="warning"}
 
@@ -214,30 +231,29 @@ All test users share the same password: :code[Unicorn123!]{showCopyAction=true}
 5. Ask: **"Show me top 5 customers by revenue"** — same query, same tenant data
 6. Ask: **"Create a booking for my top customer next Sunday 2:30 pm for 30 mins with unicorn Vega Sapphire"** — the agent cannot do this. The `create_booking_tool` is **inaccessible** for the analyst.
 
-### Step 7.7: Test Tenant Data Isolation
+### Step 7.7: Test Tenant Data Isolation — *Part B payoff*
 
-This is the most important test. Log in as users from **different tenants** and verify they see different data.
+This is the most important test in the workshop. Log in as users from **different tenants** and confirm they see different data from the *same* question.
 
 **As Mythical Unicorns (Lyra):**
-1. Ask: **"Show me top 3 customers"** — note the customer names
-2. Ask: **"What's my total revenue?"** — note the figure
+1. Ask: **"Show me my top 3 customers by revenue"** — **write down the #1 customer's name.**
 
 **As Mythic Unicorns (Aria):**
-3. Log out, log in as :code[aria.skybloom@example-mythicunicorns.com]{showCopyAction=true}
-4. Ask: **"Show me top 3 customers"** — you should see **completely different** names
-5. Ask: **"What's my total revenue?"** — the figure should be different
+2. Log out, log in as :code[aria.skybloom@example-mythicunicorns.com]{showCopyAction=true}
+3. Ask the **exact same question** — **write down her #1 customer's name.**
 
-::alert[**This is the pool model in action.** Both tenants share the same agent, same Gateway, same Lambda, same database — but each sees only their own data. The isolation is enforced by PostgreSQL RLS, not by the application. Even if the LLM generates a Custom SQL query without a tenant filter, RLS still protects the data.]{type="success"}
+::alert[**What you should see — and why it's the whole point.** Lyra's and Aria's #1 customers are **different names** (e.g. Lyra's top customer is an organization; Aria's is a different individual entirely). Same agent, same Gateway, same Lambda, same SQL — but each tenant got only **their own rows**. *That difference is RLS working.* Before you flipped `EnforceRls`, both users would have seen the **same** global list (the Lambda was connecting as the table owner, which bypasses RLS). Now the database engine itself filters by `account_id` from the JWT — isolation no application bug can undo. Even if the LLM wrote a Custom-SQL query with no tenant filter, RLS still protects the data.
 
-### Step 7.8: The Invisibility Test
+**If both users see the same names,** RLS isn't active: re-check that you flipped `EnforceRls` to `on` and ran `make deploy` (Step 7.2), and that `make status` shows `UPDATE_COMPLETE`.]{type="success"}
+
+### Step 7.8: The Invisibility Test — *Part A payoff*
 
 The Cedar policy doesn't just *refuse* the booking tool — it makes it **invisible**.
 
-1. Log in as Orion (analyst), ask: **"What tools do you have?"**
-2. The agent lists its tools — Create Booking tool is **not in the list**
-3. Log in as Lyra (admin), ask the same — The Create Booking tool **appears**
+1. Log in as **Orion (analyst)**, ask: **"List every tool you can use."**
+2. Log in as **Lyra (admin)**, ask the **same** question.
 
-::alert[**Infrastructure-level vs prompt-level security.** A prompt restriction ("don't let analysts create bookings") can be bypassed with prompt injection. Cedar policy cannot — the tool literally doesn't exist in the analyst's session. The agent can't call what it can't see.]{type="info"}
+::alert[**What you should see.** Orion's list contains only *read* booking tools (e.g. `get_bookings`, `get_booking_summary`) — there is **no create-booking tool**. Lyra's list **includes `APIInteg___create_booking_tool`.** Same agent, same Gateway; the only difference is the `custom:role` claim in their JWT, and Cedar uses it to hide the write tool from the analyst *at the Gateway, before the agent runs.* A prompt restriction ("don't let analysts create bookings") can be talked around with prompt injection; this cannot — **the agent can't call what it can't see.** That's why this belongs at the infrastructure layer, not in the prompt.]{type="info"}
 
 ## How It All Fits Together
 

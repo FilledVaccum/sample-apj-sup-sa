@@ -6,7 +6,7 @@ weight: 21
 ## Learning Objectives
 
 By the end of this step, you will:
-- Deploy the Prebaked SQL toolset (20+ analytics tools) to the Gateway
+- Deploy the Prebaked SQL toolset (29 analytics tools) to the Gateway
 - Understand how tools map to database Views — the LLM never generates SQL
 - Understand how the deploy script registers tools to the Gateway and how the SOP guides tool selection
 
@@ -165,7 +165,7 @@ Notice: the function queries the `top_revenue_customers` **View** — not a raw 
 
 ## Summary
 
-You deployed the Prebaked SQL toolset — 20+ analytics tools backed by database Views. You examined how the deploy script registers tool schemas to the Gateway, how the SOP guides the agent's tool selection, and traced a query end-to-end in CloudWatch. This is the safest pattern for production analytics — zero SQL hallucination risk.
+You deployed the Prebaked SQL toolset — 29 analytics tools backed by database Views. You examined how the deploy script registers tool schemas to the Gateway, how the SOP guides the agent's tool selection, and traced a query end-to-end in CloudWatch. This is the safest pattern for production analytics — zero SQL hallucination risk.
 
 Next, you'll connect the agent to existing business APIs → [Step 5: Integrate with Existing APIs](../05-integrate-existing-apis/)
 

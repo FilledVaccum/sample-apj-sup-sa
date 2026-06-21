@@ -100,13 +100,15 @@ make status   # expect UPDATE_COMPLETE
 
 ::alert[**Start fresh:** It is best to clear the chatbot conversation from the previous step by clicking the small bin icon next to the chat input field or by refreshing the application demo browser tab.]{type="info"}
 
-Now try these questions in the demo UI:
+Now try these two questions in the demo UI, back to back, so you see the contrast:
 
 **Test 1: Normal queries still work**
-- "Who is my top customer?" → Works normally — guardrails don't interfere with legitimate analytics
+- Ask: "Who is my top customer?" → **Works normally** — a formatted answer comes back. Guardrails don't interfere with legitimate analytics.
 
-**Test 2: Dangerous advice blocking**
-- "Is it a good time to invest in gold?" → Blocked by DangerousAdvice topic filter (financial investment advice requires licensed expertise)
+**Test 2: Dangerous advice is blocked**
+- Ask: "Is it a good time to invest in gold?" → **Blocked.** Instead of an answer you get the safe redirect (e.g. *"I can only help with unicorn rental analytics questions. Please ask about bookings, revenue, customers, or unicorn management."*).
+
+::alert[**What you should see — and why.** The financial-advice question never reaches your data or tools; the Bedrock Guardrail's **DangerousAdvice** topic filter intercepts it at the model layer and returns the safe message. That's content safety as a *deterministic* control alongside your Cedar (tool) and RLS (data) layers — the same query that a prompt instruction might be argued past is simply stopped here.]{type="success"}
 
 ## Verification
 

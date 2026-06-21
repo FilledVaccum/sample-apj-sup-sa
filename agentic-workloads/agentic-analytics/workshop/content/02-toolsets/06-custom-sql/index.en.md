@@ -13,7 +13,7 @@ By the end of this step, you will:
 
 ## The Problem
 
-Your agent has 20+ prebaked tools, but tenants always ask questions that don't map to any existing tool: "What's the average booking duration by unicorn breed?" Building a tool for every possible question isn't scalable.
+Your agent has 29 prebaked tools, but tenants always ask questions that don't map to any existing tool: "What's the average booking duration by unicorn breed?" Building a tool for every possible question isn't scalable.
 
 ## The Solution: Custom SQL with RAG
 
@@ -57,8 +57,8 @@ You'll see:
 
 1. In the Knowledge Base console, click `agentic-analytics-kb` breadcrumbs menu on top to navigate up
 2. Click **Test knowledge base** (right panel)
-3. Select a model, preferably `Claude Opus 4.6` under `Anthropic` category, and click `Apply`
-3. Try these queries:
+3. Select any available **Claude** model under the `Anthropic` category (a Sonnet or Opus model is ideal), and click `Apply`
+4. Try these queries:
    - "How to calculate booking duration?" — should return the section about `end_datetime - start_datetime`
    - "What is the relationship between bookings and unicorns?" — should return JOIN patterns
    - "How is revenue calculated?" — should return the revenue formula
@@ -111,11 +111,11 @@ If you're not logged in to the chat UI, log in as:
 | Username | `orion.moonshadow@example-mythicalunicorns.com` |
 | Password | `Unicorn123!` |
 
-::alert[**Use the right user:** In case you intend to run the below queries after deploying the AgentCore Policy and RLS in step 7, you MUST use users with "analyst" or "rental_admin" or "saas_admin" type to be able to use the custom SQL. The user above (Orion Moonshadow) is an analyst. If you run this step before deploying the components in step 7, the user does not matter.]{type="info"}
+::alert[**Use the right user:** In case you intend to run the below queries after deploying the AgentCore Policy and RLS in step 7, you MUST use users with "analyst" or "rental_admin" or "saas_admin" type to be able to use the custom SQL. The user above (Orion Moonshadow) is an analyst role. If you run this step before deploying the components in step 7, the user does not matter.]{type="info"}
 
 ::alert[**Start fresh:** It is best to clear the chatbot conversation from the previous step by clicking the small bin icon next to the chat input field or by refreshing the application demo browser tab.]{type="info"}
 
-Try these ad-hoc analytics questions — none are covered by the 27 prebaked tools, so the agent will use `CustomSQL___text_to_sql_tool` and show an **approval card** for each:
+Try these ad-hoc analytics questions — none are covered by the 29 prebaked tools, so the agent will use `CustomSQL___text_to_sql_tool` and show an **approval card** for each:
 
 **Query 1: Booking duration by breed**
 - Ask: "What's the average booking duration by unicorn breed?"
