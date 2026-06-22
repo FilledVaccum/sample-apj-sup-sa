@@ -1,27 +1,36 @@
 /**
  * voiceClient — thin wrapper over the Pipecat JS client for the analytics
- * dashboard's Voice Mode (presenter). Connects to the voice AgentCore Runtime
- * over WebRTC (SmallWebRTC transport + KVS managed TURN) and surfaces the events
- * ChatPanel needs through plain callbacks.
+ * dashboard's Voice Mode (presenter). Supports TWO deploy modes, chosen by which
+ * runtime-config URL is present:
  *
- * Voice is additive: this module is only loaded/used when the user turns Voice
- * Mode ON. Text chat (awsAgentCore.invokeAgent) is unaffected.
+ *  • AgentCore mode (VOICE_SIGNALING_URL): SmallWebRTC transport + KVS managed TURN.
+ *    The browser POSTs its SDP offer (and PATCHes trickled ICE) to
+ *    {VOICE_SIGNALING_URL}/api/offer. A JWT-gated signaling proxy validates the
+ *    Cognito token at the API-Gateway edge, forwards it as a Bearer to the JWT-only
+ *    voice AgentCore Runtime /invocations, and unwraps the runtime's SSE answer into
+ *    the plain JSON SDP answer the transport expects. Media flows browser ↔ KVS TURN
+ *    ↔ runtime.
  *
- * Signaling: the browser POSTs its SDP offer (and PATCHes trickled ICE) to a tiny
- * JWT-gated signaling proxy ({VOICE_SIGNALING_URL}/api/offer). The proxy validates
- * the Cognito token at the API-Gateway edge, forwards it as a Bearer to the
- * JWT-only voice runtime /invocations, and unwraps the runtime's SSE answer into
- * the plain JSON SDP answer the SmallWebRTC transport expects. Media then flows
- * browser ↔ KVS TURN ↔ runtime. (The runtime can't be hit directly from the
- * browser because it speaks a wrapped/SSE signaling contract the stock transport
- * doesn't understand.)
+ *  • Pipecat Cloud mode (VOICE_START_URL): Daily transport + Daily SFU. The browser
+ *    POSTs its Cognito Bearer token (+ shared runtimeSessionId) to the JWT start
+ *    proxy ({VOICE_START_URL}); the proxy validates the token, calls Pipecat Cloud
+ *    /start server-side with the PCC key, and returns {dailyRoom, dailyToken}. The
+ *    browser then joins that Daily room via DailyTransport. Media flows browser ↔
+ *    Daily SFU ↔ PCC-hosted bot.
  *
- * Verified against @pipecat-ai/client-js exports (PipecatClient, RTVIEvent) and
- * @pipecat-ai/small-webrtc-transport SmallWebRTCTransport (webrtcRequestParams
- * APIRequest with endpoint+headers+requestData).
+ * In BOTH modes the same Cognito access token is the identity the bot forwards to
+ * the analytics runtime (per-user RBAC/RLS), and the same RTVI events surface to
+ * ChatPanel via the callbacks below. Voice is additive: this module is only loaded
+ * when the user turns Voice Mode ON; text chat (awsAgentCore.invokeAgent) is
+ * unaffected.
+ *
+ * Verified against @pipecat-ai/client-js (PipecatClient, RTVIEvent),
+ * @pipecat-ai/small-webrtc-transport (SmallWebRTCTransport, webrtcRequestParams),
+ * and @pipecat-ai/daily-transport (DailyTransport; connect({url, token})).
  */
 import { PipecatClient, RTVIEvent } from '@pipecat-ai/client-js';
 import { SmallWebRTCTransport } from '@pipecat-ai/small-webrtc-transport';
+import { DailyTransport } from '@pipecat-ai/daily-transport';
 import { fetchAccessToken } from './authService';
 import { getRuntimeSessionId } from './awsAgentCore';
 
@@ -54,18 +63,31 @@ function detachBotAudio() {
 }
 
 // Runtime config: window.__APP_CONFIG__ (Amplify-injected) or REACT_APP_* (local).
-// VOICE_SIGNALING_URL is the base URL of the JWT-gated WebRTC signaling proxy; it
-// is set ONLY when voice is deployed (CFN EnableVoice=true VoiceMode=agentcore
-// injects it into config.js, or .env.local sets it for laptop dev). When absent,
-// voiceConfigured() is false and the UI hides the Voice button entirely.
+//  • VOICE_SIGNALING_URL → AgentCore (SmallWebRTC) voice signaling proxy base URL.
+//  • VOICE_START_URL     → Pipecat Cloud (Daily) JWT start proxy URL.
+// Exactly one is normally set per deploy (CFN injects VOICE_SIGNALING_URL for
+// VoiceMode=agentcore; deploy_voice_pcc.sh patches VOICE_START_URL for
+// VoiceMode=pipecat-cloud). When neither is set, voiceConfigured() is false and the
+// UI hides the Voice button entirely. If BOTH are set, AgentCore takes precedence.
 const RC = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {};
 export const VOICE_SIGNALING_URL =
   RC.VOICE_SIGNALING_URL ||
   process.env.REACT_APP_VOICE_SIGNALING_URL ||
   '';
+export const VOICE_START_URL =
+  RC.VOICE_START_URL ||
+  process.env.REACT_APP_VOICE_START_URL ||
+  '';
+
+// 'agentcore' (SmallWebRTC+KVS) | 'pipecat-cloud' (Daily) | '' (not configured).
+export function voiceMode() {
+  if (VOICE_SIGNALING_URL) return 'agentcore';
+  if (VOICE_START_URL) return 'pipecat-cloud';
+  return '';
+}
 
 export function voiceConfigured() {
-  return !!VOICE_SIGNALING_URL;
+  return !!voiceMode();
 }
 
 /**
@@ -90,11 +112,21 @@ export async function startVoiceSession(opts) {
     onReady,
     onError,
     onDisconnected,
+    onThinking,
     sessionId,          // app session id, shared with the text chat
   } = opts;
 
+  const mode = voiceMode();
+  if (!mode) throw new Error('Voice is not configured (no VOICE_SIGNALING_URL or VOICE_START_URL).');
+
+  // Pick the transport for the deploy mode. SmallWebRTC for AgentCore (the browser
+  // does the SDP/ICE handshake against the signaling proxy); Daily for Pipecat Cloud
+  // (the browser joins a Daily room minted by the start proxy).
+  const transport = mode === 'agentcore'
+    ? new SmallWebRTCTransport()
+    : new DailyTransport();
   const client = new PipecatClient({
-    transport: new SmallWebRTCTransport(),
+    transport,
     enableMic: true,
     enableCam: false,
   });
@@ -152,41 +184,29 @@ export async function startVoiceSession(opts) {
   });
 
   // "Thinking" window: user stopped talking → agent is working. Cleared when the
-  // real answer arrives (onDisplay in ChatPanel) or on error/disconnect. (The
-  // spoken instant filler is OFF by default — see VOICE_SPOKEN_FILLER in
-  // analytics_processor.py — so first bot speech is normally the real answer; the
-  // grace window in ChatPanel's onBotSpoken is a harmless backstop for when the
-  // filler is explicitly enabled on an AEC-capable transport.)
-  const { onThinking } = opts;
+  // real answer arrives (onDisplay in ChatPanel) or on error/disconnect.
   client.on(RTVIEvent.UserStoppedSpeaking, () => onThinking && onThinking(true));
 
   client.on(RTVIEvent.BotReady, () => fireReady());
   client.on(RTVIEvent.Error, (e) => onError && onError(e));
   client.on(RTVIEvent.Disconnected, () => { detachBotAudio(); if (onDisconnected) onDisconnected(); });
 
-  // Signaling: the SmallWebRTC transport POSTs its SDP offer (and PATCHes trickled
-  // ICE candidates) to {VOICE_SIGNALING_URL}/api/offer. We attach the user's Cognito
-  // access token as a Bearer header (the proxy's API-Gateway JWT authorizer validates
-  // it, then forwards it to the runtime so RBAC/RLS apply to the REAL user) and the
-  // shared runtimeSessionId header (so voice + text share one AgentCore Memory thread).
-  // The token also rides in requestData as a backstop. Refresh the token right before
-  // connect so a long-idle tab doesn't open with an expired one.
+  // The user's Cognito access token is the identity the bot forwards to the
+  // analytics runtime (per-user RBAC/RLS). Refresh it right before connect so a
+  // long-idle tab doesn't open with an expired one.
   let userToken = null;
   try {
     userToken = await fetchAccessToken();
   } catch (e) {
-    // hosted proxy will reject with 401 if the token is absent/expired
+    // proxy will reject with 401 if the token is absent/expired
   }
-  const headers = new Headers();
-  if (userToken) headers.set('Authorization', `Bearer ${userToken}`);
+  // Shared session id so voice + text chat share one AgentCore Memory thread.
   const sharedSessionId = sessionId ? getRuntimeSessionId(sessionId) : '';
-  if (sharedSessionId) {
-    headers.set('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id', sharedSessionId);
-  }
 
   // Watchdog: if neither BotReady nor bot audio arrives within the bound, stop
   // hanging on "enabling voice…" — tear down and report an error the UI can show.
-  // 45s comfortably covers an AgentCore microVM cold start (~5-10s) + WebRTC setup.
+  // 45s comfortably covers an AgentCore microVM cold start or a PCC cold start
+  // (~10s) + WebRTC/Daily setup.
   readyWatchdog = setTimeout(() => {
     if (_readyFired) return;
     _readyFired = true;
@@ -194,18 +214,42 @@ export async function startVoiceSession(opts) {
     if (onError) onError(new Error('Voice timed out while connecting. Please try again.'));
   }, 45000);
 
-  // webrtcRequestParams (APIRequest): the transport sends {sdp,type,...} to this
-  // endpoint with these headers; requestData is merged into the body so the proxy
-  // also sees the shared session id. The proxy unwraps the runtime's SSE answer to
-  // the plain JSON SDP answer the transport expects.
   try {
-    await client.connect({
-      webrtcRequestParams: {
-        endpoint: `${VOICE_SIGNALING_URL}/api/offer`,
-        headers,
-        requestData: sharedSessionId ? { runtimeSessionId: sharedSessionId } : undefined,
-      },
-    });
+    if (mode === 'agentcore') {
+      // AgentCore: the SmallWebRTC transport POSTs its SDP offer (and PATCHes
+      // trickled ICE) to {VOICE_SIGNALING_URL}/api/offer with the Bearer token +
+      // shared session id headers; requestData carries the session id into the body.
+      const headers = new Headers();
+      if (userToken) headers.set('Authorization', `Bearer ${userToken}`);
+      if (sharedSessionId) headers.set('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id', sharedSessionId);
+      await client.connect({
+        webrtcRequestParams: {
+          endpoint: `${VOICE_SIGNALING_URL}/api/offer`,
+          headers,
+          requestData: sharedSessionId ? { runtimeSessionId: sharedSessionId } : undefined,
+        },
+      });
+    } else {
+      // Pipecat Cloud: call the JWT start proxy ourselves (it isn't the stock
+      // Pipecat /start shape — it validates our Cognito token, calls PCC with the
+      // secret key, and returns {dailyRoom, dailyToken}). Then join that Daily room.
+      const startHeaders = { 'Content-Type': 'application/json' };
+      if (userToken) startHeaders['Authorization'] = `Bearer ${userToken}`;
+      const startResp = await fetch(VOICE_START_URL, {
+        method: 'POST',
+        headers: startHeaders,
+        body: JSON.stringify(sharedSessionId ? { runtimeSessionId: sharedSessionId } : {}),
+      });
+      if (!startResp.ok) {
+        let detail = '';
+        try { detail = (await startResp.json()).error || ''; } catch (e) { /* ignore */ }
+        throw new Error(`Voice start failed: HTTP ${startResp.status}${detail ? ' — ' + detail : ''}`);
+      }
+      const { dailyRoom, dailyToken } = await startResp.json();
+      if (!dailyRoom) throw new Error('Voice start returned no Daily room.');
+      // DailyTransport.connect expects Daily call options: { url, token }.
+      await client.connect({ url: dailyRoom, token: dailyToken });
+    }
   } catch (e) {
     if (readyWatchdog) { clearTimeout(readyWatchdog); readyWatchdog = null; }
     throw e;

@@ -116,6 +116,22 @@ def handler(event, _context):
     except Exception as e:  # noqa: BLE001
         return _resp(401, {"error": f"invalid token: {e}"}, origin)
 
+    # 1b. Read the shared runtimeSessionId from the browser's request body (if any),
+    # so voice + text chat share one AgentCore Memory thread. The browser sends it
+    # in the POST body; we forward it into the PCC session body alongside the token.
+    runtime_session_id = ""
+    try:
+        raw = event.get("body") or ""
+        if event.get("isBase64Encoded"):
+            import base64 as _b64
+            raw = _b64.b64decode(raw).decode("utf-8", "ignore")
+        if raw:
+            req_body = json.loads(raw)
+            if isinstance(req_body, dict):
+                runtime_session_id = req_body.get("runtimeSessionId") or ""
+    except Exception:  # noqa: BLE001
+        runtime_session_id = ""
+
     # 2. Call Pipecat Cloud start API server-side with the secret key. Forward the
     # (now-validated) user access token in the session `body` so the bot uses it
     # as the AgentCore gateway_token — i.e. RBAC/RLS apply to the REAL speaking
@@ -128,9 +144,12 @@ def handler(event, _context):
     if not pcc_key or pcc_key == "REPLACE_ME":
         return _resp(503, {"error": "PCC key placeholder not filled — run deploy_voice_pcc.sh"}, origin)
     url = f"https://api.pipecat.daily.co/v1/public/{agent}/start"
+    session_body = {"gateway_token": token}
+    if runtime_session_id:
+        session_body["runtimeSessionId"] = runtime_session_id
     payload = json.dumps({
         "createDailyRoom": True,
-        "body": {"gateway_token": token},
+        "body": session_body,
     }).encode()
     req = urllib.request.Request(
         url, data=payload, method="POST",
