@@ -73,8 +73,12 @@ Parameters:
 
   CubeApiSecret:
     Type: String
+    Default: ''
     NoEcho: true
-    Description: Shared secret for Cube API authentication
+    Description: Shared secret for Cube API authentication. Empty in demo mode (the
+      SemanticLayer Lambda is gated on CubePrivateIp, also empty in demo). main-stack
+      does not pass this in demo mode, so a Default is required for stack UPDATE to
+      succeed (CFN rejects an untouched nested param with no value).
 
   GlueDatabaseName:
     Type: String
