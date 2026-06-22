@@ -356,10 +356,21 @@ async def agent_invocation(payload, context):
             f"{system_prompt}\n\n## ACTIVE MODE: {mode}\n"
             f"Format this response for `{mode}` mode per Step 5 of the SOP. "
             + (
-                "Lead with exactly one <speak>...</speak> headline (1-3 spoken sentences, no "
-                "markup), then the full displayed answer with any tables and <chart> tags."
+                # Voice: emit a streamed spoken acknowledgement FIRST (before any tool
+                # call), then the headline, then the displayed answer. The <ack> is the
+                # very first thing you output — it is spoken aloud immediately so the
+                # user hears you engage during the (silent) data-fetch gap.
+                "Begin your response with exactly one <ack>...</ack> block as the VERY FIRST "
+                "output, BEFORE calling any tool: a brief, natural, CONTEXT-SPECIFIC spoken "
+                "acknowledgement of THIS request (e.g. <ack>Sure — let me pull your booking "
+                "numbers.</ack>). It must reference what was asked, vary every turn, contain NO "
+                "markup/numbers/SQL, and be one short sentence. Then call your tools. Then emit "
+                "exactly one <speak>...</speak> headline (1-3 spoken sentences, no markup), then "
+                "the full displayed answer with any tables and <chart> tags."
                 if mode == "voice"
-                else "Respond in plain markdown (no <speak> block)."
+                # Text: plain markdown ONLY. No spoken tags at all — they would leak into chat.
+                else "Respond in plain markdown ONLY. Do NOT emit any <ack> or <speak> tags — "
+                     "those are for voice mode only; in text mode they would appear as literal text."
             )
         )
         # Chart upload target — the code-interpreter sandbox can't read the agent's

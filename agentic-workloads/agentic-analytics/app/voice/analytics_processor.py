@@ -132,6 +132,31 @@ def _extract_chart_tags(displayed: str) -> tuple[str, list[tuple[str, str, str]]
     return cleaned, charts
 
 
+def _extract_ack(buf: str) -> tuple[str | None, str]:
+    """If `buf` contains a COMPLETE <ack>...</ack> block, return (ack_text, buf_without_ack).
+
+    Used to detect the model's leading spoken acknowledgement AS IT STREAMS, so we can
+    speak it immediately (during the silent tool-call gap) instead of waiting for the
+    whole turn. Returns (None, buf) until a full closing </ack> has arrived. The ack is
+    a short plain sentence (no markup), so a simple non-greedy match is safe.
+    """
+    import re
+    m = re.search(r"<ack>(.*?)</ack>", buf, re.S | re.I)
+    if not m:
+        return None, buf
+    ack = re.sub(r"</?ack>", "", m.group(1), flags=re.I).strip()
+    cleaned = (buf[:m.start()] + buf[m.end():])
+    return (ack or None), cleaned
+
+
+def _strip_ack(text: str) -> str:
+    """Remove any <ack>...</ack> block (and stray ack tags) from text — final-cleanup
+    backstop so the acknowledgement never leaks into the spoken headline or the display."""
+    import re
+    text = re.sub(r"<ack>.*?</ack>", "", text, flags=re.S | re.I)
+    return re.sub(r"</?ack>", "", text, flags=re.I)
+
+
 def _extract_text(line: str) -> str | None:
     """Extract spoken text from a single Strands SSE data line (without 'data: ' prefix).
 
@@ -204,6 +229,11 @@ class AnalyticsAgentCoreProcessor(FrameProcessor):
         # "thinking" indicator already covers latency feedback. Only enable this
         # where AEC is guaranteed (set VOICE_SPOKEN_FILLER=true).
         self._spoken_filler = os.getenv("VOICE_SPOKEN_FILLER", "false").lower() in ("true", "1", "yes")
+        # Dynamic ack (Option A): speak the model's own leading <ack> as it streams,
+        # instead of a static _FILLERS phrase. Defaults ON whenever spoken filler is
+        # enabled (i.e. on AEC-capable transports). Set VOICE_DYNAMIC_ACK=false to fall
+        # back to the static filler. Has no effect unless _spoken_filler is also on.
+        self._dynamic_ack = os.getenv("VOICE_DYNAMIC_ACK", "true").lower() in ("true", "1", "yes")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -237,12 +267,17 @@ class AnalyticsAgentCoreProcessor(FrameProcessor):
         # selects the voice branch of its single SOP from this mode field.
         payload["mode"] = "voice"
 
-        # Instant filler: speak a short acknowledgement the MOMENT the (slow) agent
-        # call begins. DISABLED by default (see __init__): without echo cancellation
-        # this bot audio echoes into the mic during the agent's thinking gap and
-        # trips a false barge-in that cancels the turn. Enable only with guaranteed
-        # AEC via VOICE_SPOKEN_FILLER=true.
-        if self._spoken_filler:
+        # Acknowledgement during the (silent) agent think gap. TWO mutually-exclusive
+        # strategies, both gated on AEC being present (without echo cancellation the
+        # bot's own audio echoes into the mic and trips a false barge-in):
+        #   • Dynamic ack (Option A, PREFERRED): the MODEL emits a leading
+        #     <ack>...</ack>, which the stream loop below speaks the moment it arrives
+        #     — contextual, no static words. Enabled by VOICE_DYNAMIC_ACK (default on
+        #     where _spoken_filler is on). Nothing to push here; the loop handles it.
+        #   • Static filler (legacy fallback): a canned phrase from _FILLERS, spoken
+        #     immediately. Only if explicitly forced AND dynamic ack is off, so the two
+        #     never double-speak.
+        if self._spoken_filler and not self._dynamic_ack:
             filler = _FILLERS[self._filler_idx % len(_FILLERS)]
             self._filler_idx += 1
             await self.push_frame(TTSSpeakFrame(filler))
@@ -254,6 +289,16 @@ class AnalyticsAgentCoreProcessor(FrameProcessor):
         # ONLY the <speak> block (never the agent's pre-<speak> tool narration or
         # the post-</speak> markdown table).
         chunks: list[str] = []
+        # Streaming acknowledgement (Option A): the model emits a leading
+        # <ack>...</ack> BEFORE calling tools. We watch the growing text and, the
+        # moment a complete <ack> has streamed in, speak it immediately — so the user
+        # hears a contextual acknowledgement during the (silent) data-fetch gap,
+        # instead of a static Pipecat-side filler. Gated to AEC-capable transports
+        # (the bot would otherwise hear its own ack as a barge-in); PCC+Daily runs
+        # Krisp, so it's enabled there. _ack_text accumulates only the spoken text
+        # seen so far (charts/tool noise are not in the spoken stream).
+        ack_spoken = False
+        ack_seen = ""
 
         # JWT-native invoke: the runtime authorizer validates the user's Cognito access
         # token (gateway_token), so we call InvokeAgentRuntime over plain HTTPS with
@@ -311,6 +356,17 @@ class AnalyticsAgentCoreProcessor(FrameProcessor):
                                 text = _extract_text(line)
                             if text:
                                 chunks.append(text)
+                                # Speak the leading <ack> the instant it's complete,
+                                # before the rest of the turn (the slow tool calls)
+                                # arrives. Only on AEC-capable transports.
+                                if self._spoken_filler and self._dynamic_ack and not ack_spoken:
+                                    ack_seen += text
+                                    ack, _ = _extract_ack(ack_seen)
+                                    if ack:
+                                        ack_spoken = True
+                                        await self.push_frame(LLMFullResponseStartFrame())
+                                        await self.push_frame(LLMTextFrame(ack))
+                                        await self.push_frame(LLMFullResponseEndFrame())
                         if total_bytes > MAX_BYTES:
                             logger.warning(f"AgentCore stream exceeded {MAX_BYTES} bytes; truncating read")
                             done = True
@@ -343,6 +399,10 @@ class AnalyticsAgentCoreProcessor(FrameProcessor):
         if not full:
             logger.warning(f"[turn] agent returned no text ({total_bytes}B read)")
             return
+        # Drop the leading <ack> from the final text: if it was spoken mid-stream it
+        # must not be re-spoken in the headline; and it must never appear in the
+        # displayed transcript. Backstop strip covers stray/unspoken acks too.
+        full = _strip_ack(full).lstrip()
         logger.info(f"[turn] agent answer received ({len(full)} chars, {total_bytes}B)")
 
         # Voice mode always returns the presenter split (spoken <speak> headline +
