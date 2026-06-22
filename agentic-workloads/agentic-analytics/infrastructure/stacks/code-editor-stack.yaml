@@ -480,8 +480,8 @@ Resources:
           AURORA_ENDPOINT=${AuroraEndpoint}
           AURORA_SECRET_ARN=${DatabaseSecretArn}
           # ^ postgres secret — used by the local Step-1 exercise. RLS for the
-          #   DEPLOYED agent is controlled in the top-up CFN (Step 7.2 EnforceRls),
-          #   not here.
+          #   DEPLOYED agent is a runtime SSM flag (/<env>/rls-mode), flipped in
+          #   Step 7.2 — not here.
           DATABASE_NAME=${DatabaseName}
           KNOWLEDGE_BASE_ID=${KnowledgeBaseId}
           GLUE_DATABASE=${GlueDatabaseName}

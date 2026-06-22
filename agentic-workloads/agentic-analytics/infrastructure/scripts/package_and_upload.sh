@@ -126,12 +126,24 @@ echo "  observability_setup: $OBSERVABILITY_KEY"
 
 # Package demo-mode artifacts (agent code, datafoundation Lambda, psycopg2 layer, amplify)
 if [ "$DEPLOY_MODE" != "workshop" ]; then
-    # Package datafoundation Lambda (tools for Gateway target)
+    # Package datafoundation Lambda (tools for Gateway target). Hash-versioned like
+    # the other tool Lambdas: the demo stack fronts this function with a provisioned-
+    # concurrency alias (AWS::Lambda::Version), and CFN only republishes the Version
+    # when a template property changes. A fixed S3 key would keep the same S3Key string
+    # across code edits, so CFN would see "no change" and the warm alias would serve
+    # STALE code. The hash suffix flips DataFoundationLambdaKey on every source change,
+    # forcing the function (and its Version/alias) to update.
     echo "Packaging datafoundation Lambda..."
     cd "$AGENT_DIR"
     zip -j "$TEMP_DIR/datafoundation_lambda.zip" tools/prebaked_sql_toolset_lambda.py > /dev/null
-    aws s3 cp "$TEMP_DIR/datafoundation_lambda.zip" "s3://$BUCKET/$(s3_path "lambda/datafoundation_lambda.zip")" --region $REGION > /dev/null
-    echo "  datafoundation: lambda/datafoundation_lambda.zip"
+    if command -v sha256sum &> /dev/null; then
+        HASH=$(sha256sum "$TEMP_DIR/datafoundation_lambda.zip" | cut -c1-8)
+    else
+        HASH=$(shasum -a 256 "$TEMP_DIR/datafoundation_lambda.zip" | cut -c1-8)
+    fi
+    DATAFOUNDATION_KEY="lambdas/datafoundation-${HASH}.zip"
+    aws s3 cp "$TEMP_DIR/datafoundation_lambda.zip" "s3://$BUCKET/$(s3_path "$DATAFOUNDATION_KEY")" --region $REGION > /dev/null
+    echo "  datafoundation: $DATAFOUNDATION_KEY"
 
     # Package additional tool Lambdas (api_integration, custom_sql, semantic_layer)
     package_tool_lambda() {
@@ -236,6 +248,22 @@ if [ "$DEPLOY_MODE" != "workshop" ]; then
         echo "  psycopg2 layer: layers/psycopg2-py312.zip"
     else
         echo "  WARNING: Could not download psycopg2-binary wheel. Provide Psycopg2LayerArn param manually."
+    fi
+
+    # Package PyJWT + cryptography Lambda layer (tool Lambdas verify the Cognito
+    # access token's RS256 signature for defense-in-depth before trusting RLS claims).
+    echo "Packaging pyjwt Lambda layer..."
+    PYJWT_LAYER_DIR="$TEMP_DIR/pyjwt_layer/python"
+    mkdir -p "$PYJWT_LAYER_DIR"
+    if pip3 install --quiet \
+          --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
+          --only-binary=:all: --target "$PYJWT_LAYER_DIR" "PyJWT==2.10.1" "cryptography==44.0.0" 2>/dev/null; then
+        cd "$TEMP_DIR/pyjwt_layer"
+        zip -r "$TEMP_DIR/pyjwt-py312.zip" python > /dev/null
+        aws s3 cp "$TEMP_DIR/pyjwt-py312.zip" "s3://$BUCKET/$(s3_path "layers/pyjwt-py312.zip")" --region $REGION > /dev/null
+        echo "  pyjwt layer: layers/pyjwt-py312.zip"
+    else
+        echo "  WARNING: Could not build pyjwt layer. Provide PyJwtLayerArn param manually."
     fi
 
     # Package amplify_hosting Lambda
@@ -367,6 +395,7 @@ echo "  DatabaseInitLambdaKey=$DB_INIT_KEY"
 echo "  GlueCrawlerLambdaKey=$GLUE_KEY"
 echo "  BedrockKBLambdaKey=$BEDROCK_KEY"
 echo "  AmplifyLambdaKey=$AMPLIFY_KEY"
+echo "  DataFoundationLambdaKey=${DATAFOUNDATION_KEY:-lambda/datafoundation_lambda.zip}"
 echo "  InterceptorLambdaKey=$INTERCEPTOR_KEY"
 echo "  ApiIntegLambdaKey=$API_INTEG_KEY"
 echo "  CustomSqlLambdaKey=$CUSTOM_SQL_KEY"
@@ -399,6 +428,7 @@ echo "      ParameterKey=GlueCrawlerLambdaKey,ParameterValue=$GLUE_KEY \\"
 echo "      ParameterKey=BedrockKBLambdaKey,ParameterValue=$BEDROCK_KEY \\"
 echo "      ParameterKey=AgentCodeS3Key,ParameterValue=agent/agent_code.zip \\"
 echo "      ParameterKey=AmplifyLambdaKey,ParameterValue=$AMPLIFY_KEY \\"
+echo "      ParameterKey=DataFoundationLambdaKey,ParameterValue=${DATAFOUNDATION_KEY:-lambda/datafoundation_lambda.zip} \\"
 echo "      ParameterKey=InterceptorLambdaKey,ParameterValue=$INTERCEPTOR_KEY \\"
 echo "      ParameterKey=ApiIntegLambdaKey,ParameterValue=$API_INTEG_KEY \\"
 echo "      ParameterKey=CustomSqlLambdaKey,ParameterValue=$CUSTOM_SQL_KEY \\"

@@ -50,6 +50,11 @@ Parameters:
     Default: lambdas/amplify_hosting.zip
     Description: S3 key for Amplify Hosting Lambda (use hash-versioned key)
 
+  DataFoundationLambdaKey:
+    Type: String
+    Default: lambda/datafoundation_lambda.zip
+    Description: S3 key for DataFoundation toolset Lambda (use hash-versioned key)
+
   InterceptorLambdaKey:
     Type: String
     Default: lambdas/gateway_interceptor.zip
@@ -317,7 +322,7 @@ Resources:
         KnowledgeBaseId: !GetAtt BedrockKBStack.Outputs.KnowledgeBaseId
         CognitoUserPoolId: !GetAtt CognitoStack.Outputs.UserPoolId
         CognitoClientId: !GetAtt CognitoStack.Outputs.UserLoginClientId
-        DataFoundationLambdaKey: lambda/datafoundation_lambda.zip
+        DataFoundationLambdaKey: !Ref DataFoundationLambdaKey
         InterceptorLambdaKey: !Ref InterceptorLambdaKey
         ApiIntegLambdaKey: !Ref ApiIntegLambdaKey
         CustomSqlLambdaKey: !Ref CustomSqlLambdaKey

@@ -99,6 +99,22 @@ else
     echo "    [warn] could not build psycopg2 layer locally; deploy can pass Psycopg2LayerArn instead"
 fi
 
+# PyJWT + cryptography layer for the SQL/API tool Lambdas. They verify the
+# propagated Cognito access token (RS256 signature via JWKS) for defense-in-depth
+# before trusting account_id/role for RLS. cryptography ships compiled wheels, so
+# build for python3.12 x86_64 manylinux to match the toolset Lambdas' architecture.
+echo "  topup: pyjwt layer (layers/pyjwt-py312.zip)"
+PYJWT_BUILD="$TEMP_DIR/pyjwt/python"
+mkdir -p "$PYJWT_BUILD"
+if pip3 install --quiet \
+      --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
+      --only-binary=:all: --target "$PYJWT_BUILD" "PyJWT==2.10.1" "cryptography==44.0.0" 2>/dev/null; then
+    (cd "$TEMP_DIR/pyjwt" && zip -r "$ASSETS_DIR/layers/pyjwt-py312.zip" python > /dev/null)
+    echo "    pyjwt layer built"
+else
+    echo "    [warn] could not build pyjwt layer locally; deploy can pass PyJwtLayerArn instead"
+fi
+
 # Agent code ZIP for the AgentCore Runtime container build (AgentCodeS3Key default
 # agent/agent_code.zip). The top-up's CodeBuild pulls this and builds the image.
 echo "  topup: agent_code (AgentCodeS3Key)"

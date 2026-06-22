@@ -126,27 +126,24 @@ Currently, your Lambda tools connect to the database as `postgres` — the table
 
 To fix this, you'll switch to `app_user` — a non-owner role created during the base CloudFormation deployment. Because `app_user` doesn't own the tables, PostgreSQL automatically enforces RLS on every query.
 
-#### TODO 7.2: Flip the EnforceRls switch
+#### TODO 7.2: Flip the RLS feature flag (no redeploy)
 
-Open :code[agentcore-topup-stack.yaml]{showCopyAction=true} and find `TODO 7.2` in the `Conditions:` block near the top of the file. **Comment the first line and uncomment the second** — exactly one line each:
+The three SQL Lambdas are already wired with **both** database secrets — the `postgres` owner and the `app_user` non-owner — and they decide which to use at **runtime** by reading a feature flag in :link[AWS Systems Manager Parameter Store]{href="https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html"}. The flag (`/agentic-analytics/rls-mode`) currently reads `disabled`, so they connect as `postgres` and RLS is bypassed. Flip it to `enabled` and they connect as `app_user` — **no `make deploy`**.
 
-```yaml
-# Before (postgres — bypasses RLS):
-  EnforceRls: !Equals ['off', 'on']     # default OFF — postgres secret, RLS bypassed
-  # EnforceRls: !Equals ['on', 'on']    # Step 7.2 ON — app_user secret, RLS enforced
-
-# After (app_user — RLS enforced):
-  # EnforceRls: !Equals ['off', 'on']   # default OFF — postgres secret, RLS bypassed
-  EnforceRls: !Equals ['on', 'on']      # Step 7.2 ON — app_user secret, RLS enforced
-```
-
-Then redeploy:
+Flip it from the Code Editor terminal:
 
 ```bash
-make deploy
+aws ssm put-parameter --name /agentic-analytics/rls-mode \
+  --value enabled --type String --overwrite --region us-east-1
 ```
 
-::alert[**What does this change?** All three SQL Lambdas read their database secret as `AURORA_SECRET_ARN: !If [EnforceRls, <app_user secret>, <postgres secret>]`. With `EnforceRls` off, they use the `postgres` owner secret (RLS bypassed). Flipping it on points them at the `app_user` secret (non-owner, RLS enforced). The secret ARNs are imported from the base stack; the Lambda code doesn't change — only which secret it reads. One `make deploy` updates all three Lambdas at once.]{type="info"}
+(Or use the console: **Systems Manager → Parameter Store → `/agentic-analytics/rls-mode` → Edit → `enabled`**.)
+
+The Lambdas cache the flag for up to ~60 seconds, so give it a moment (or click the chat's bin icon to start a fresh conversation) before testing.
+
+::alert[**Why a runtime flag instead of a redeploy?** Both secrets are attached to each Lambda; the SSM flag picks one per request (cached briefly). Flipping RLS changes **no** infrastructure — no `make deploy`, no new Lambda version — so the change is near-instant and the provisioned-concurrency alias keeps serving warm. This is also closer to how you'd gate a security mode in production: a feature flag you can flip (and audit) without a deployment. In production you'd graduate this to :link[AWS AppConfig]{href="https://docs.aws.amazon.com/appconfig/latest/userguide/what-is-appconfig.html"} for staged rollout and automatic rollback.]{type="info"}
+
+::alert[**Fail-closed.** If the Lambda can't read the flag, it defaults to RLS **enforced** (app_user) — it errs toward over-restricting rather than leaking another tenant's rows.]{type="warning"}
 
 ### Step 7.3: Understand RLS Session Variables
 
@@ -199,15 +196,16 @@ if auth_header:
 
 This is the bridge between the Gateway (which validates the JWT) and the Lambda (which reads the JWT claims for RLS). Without it, `_extract_rls_context_from_jwt()` in the Lambda would receive no headers and RLS would have no tenant or user's role context.
 
-### Step 7.5: One deploy updates all three Lambdas
+### Step 7.5: One flag controls all three Lambdas
 
-There are **no separate scripts to re-run.** Because all three SQL Lambdas share the single `EnforceRls` switch you flipped in Step 7.2, the `make deploy` you ran there already updated `DataFoundationLambda`, `ApiIntegLambda`, and `CustomSqlLambda` to read the `app_user` secret in one shot. Confirm the stack settled:
+There are **no separate scripts to re-run and no redeploy.** All three SQL Lambdas read the same `/agentic-analytics/rls-mode` flag you flipped in Step 7.2, so `DataFoundationLambda`, `ApiIntegLambda`, and `CustomSqlLambda` all switch to the `app_user` secret together — within ~60 seconds of the flip (the cache window). Confirm the flag value:
 
 ```bash
-make status   # expect UPDATE_COMPLETE
+aws ssm get-parameter --name /agentic-analytics/rls-mode --query Parameter.Value --output text --region us-east-1
+# expect: enabled
 ```
 
-If you ran Steps 7.1 and 7.2 as separate `make deploy` calls (recommended), the Cedar enforcement and the RLS switch are both live now.
+Cedar enforcement (Step 7.1, deployed) and the RLS switch (Step 7.2, the runtime flag) are both live now.
 
 ### Step 7.6: Test Tool-Level Access Control
 
@@ -242,9 +240,9 @@ This is the most important test in the workshop. Log in as users from **differen
 2. Log out, log in as :code[aria.skybloom@example-mythicunicorns.com]{showCopyAction=true}
 3. Ask the **exact same question** — **write down her #1 customer's name.**
 
-::alert[**What you should see — and why it's the whole point.** Lyra's and Aria's #1 customers are **different names** (e.g. Lyra's top customer is an organization; Aria's is a different individual entirely). Same agent, same Gateway, same Lambda, same SQL — but each tenant got only **their own rows**. *That difference is RLS working.* Before you flipped `EnforceRls`, both users would have seen the **same** global list (the Lambda was connecting as the table owner, which bypasses RLS). Now the database engine itself filters by `account_id` from the JWT — isolation no application bug can undo. Even if the LLM wrote a Custom-SQL query with no tenant filter, RLS still protects the data.
+::alert[**What you should see — and why it's the whole point.** Lyra's and Aria's #1 customers are **different names** (e.g. Lyra's top customer is an organization; Aria's is a different individual entirely). Same agent, same Gateway, same Lambda, same SQL — but each tenant got only **their own rows**. *That difference is RLS working.* Before you flipped the flag, both users would have seen the **same** global list (the Lambda was connecting as the table owner, which bypasses RLS). Now the database engine itself filters by `account_id` from the JWT — isolation no application bug can undo. Even if the LLM wrote a Custom-SQL query with no tenant filter, RLS still protects the data.
 
-**If both users see the same names,** RLS isn't active: re-check that you flipped `EnforceRls` to `on` and ran `make deploy` (Step 7.2), and that `make status` shows `UPDATE_COMPLETE`.]{type="success"}
+**If both users see the same names,** RLS isn't active yet: confirm `/agentic-analytics/rls-mode` reads `enabled` (Step 7.2), and wait out the ~60s flag cache (or start a fresh chat) before retrying.]{type="success"}
 
 ### Step 7.8: The Invisibility Test — *Part A payoff*
 
@@ -284,7 +282,7 @@ The Cedar policy doesn't just *refuse* the booking tool — it makes it **invisi
 
 - After uncommenting both Step-7a fences and `make deploy`, the stack has a Policy Engine with 3 Cedar policies
 - `make deploy POLICY_MODE=ENFORCE` switches the Gateway to enforcement mode
-- Flipping `EnforceRls` and `make deploy` updates all three SQL Lambdas to the `app_user` secret
+- Flipping `/agentic-analytics/rls-mode` to `enabled` switches all three SQL Lambdas to the `app_user` secret (within ~60s, no redeploy)
 - Admin (Lyra) can create bookings; analyst (Orion) cannot see the tool
 - Mythical Unicorns user sees only Mythical Unicorns data
 - Mythic Unicorns user sees only Mythic Unicorns data
@@ -292,8 +290,8 @@ The Cedar policy doesn't just *refuse* the booking tool — it makes it **invisi
 ## Troubleshooting
 
 **Still seeing all tenants' data**
-- Did you flip the `EnforceRls` condition (comment line 1, uncomment line 2) and `make deploy`?
-- Confirm `make status` shows `UPDATE_COMPLETE` after the flip.
+- Did you set `/agentic-analytics/rls-mode` to `enabled` (Step 7.2)? Check: `aws ssm get-parameter --name /agentic-analytics/rls-mode --query Parameter.Value --output text`.
+- The Lambdas cache the flag ~60s — wait it out, or start a fresh chat (bin icon), then retry.
 - The Gateway Interceptor must be live — it's in the Step-2 baseline, so confirm the stack deployed cleanly back then.
 
 **Analyst can still create bookings**

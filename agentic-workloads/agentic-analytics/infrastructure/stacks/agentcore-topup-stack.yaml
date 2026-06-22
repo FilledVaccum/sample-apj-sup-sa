@@ -22,8 +22,8 @@ Description: 'AgentCore Top-Up Stack (WORKSHOP) - participant builds the agent l
 #  This file is KEPT IN SYNC with infrastructure/stacks/agentcore-stack.yaml
 #  (the demo "deploy everything" stack): the tool schemas, Cedar statements, the
 #  build chain and the guardrail body are identical; the only differences are
-#  the import-vs-nested-param inputs, the per-step comment fences, the EnforceRls
-#  toggle, and a workshop-simplified GatewayRole. Edit both when changing tools.
+#  the import-vs-nested-param inputs, the per-step comment fences, and a
+#  workshop-simplified GatewayRole. Edit both when changing tools.
 # =============================================================================
 
 Parameters:
@@ -78,6 +78,11 @@ Parameters:
     Default: ''
     Description: ARN of existing psycopg2 Lambda layer (leave empty to create one)
 
+  PyJwtLayerArn:
+    Type: String
+    Default: ''
+    Description: ARN of existing PyJWT+cryptography Lambda layer (leave empty to create one)
+
   GatewayName:
     Type: String
     Default: AgenticAnalyticsMCPGateway
@@ -98,18 +103,29 @@ Parameters:
 
 Conditions:
   NeedsPsycopg2Layer: !Equals [!Ref Psycopg2LayerArn, '']
-
-  # ---------------------------------------------------------------------------
-  # TODO 7.2 — Row-Level Security switch.
-  # The default routes the SQL Lambdas to the 'postgres' owner secret, which
-  # OWNS the tables and therefore BYPASSES Row-Level Security. In Step 7.2 you
-  # enforce RLS by switching to the 'app_user' secret: COMMENT the first line
-  # below and UNCOMMENT the second, then `make deploy`.
-  # ---------------------------------------------------------------------------
-  EnforceRls: !Equals ['off', 'on']     # default OFF — postgres secret, RLS bypassed
-  # EnforceRls: !Equals ['on', 'on']    # Step 7.2 ON — app_user secret, RLS enforced
+  NeedsPyJwtLayer: !Equals [!Ref PyJwtLayerArn, '']
 
 Resources:
+
+  #============================================================================
+  # Row-Level Security feature flag (runtime toggle — TODO 7.2)
+  #
+  # RLS is switched at RUNTIME, not by a redeploy. The three SQL Lambdas are
+  # wired with BOTH database secrets (postgres owner + app_user) and read this
+  # SSM parameter to decide which to use: 'enabled' -> app_user (RLS enforced),
+  # 'disabled' -> postgres owner (RLS bypassed). In Step 7.2 the participant
+  # changes this value in the SSM console (no `make deploy`); the Lambdas pick it
+  # up within ~60s. Keeping the toggle out of the template means flipping RLS
+  # never changes a Lambda's config — so the published version + provisioned
+  # concurrency alias stay valid (no stale-version risk).
+  #============================================================================
+  RlsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/rls-mode
+      Type: String
+      Value: disabled            # Step 7.2 flips this to 'enabled' in the console
+      Description: RLS enforcement toggle read at runtime by the SQL tool Lambdas (enabled|disabled)
 
   #============================================================================
   # Gateway Interceptor Lambda
@@ -251,6 +267,10 @@ Resources:
                 Resource:
                   - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
                   - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+              # Read the runtime RLS feature flag (TODO 7.2 toggle).
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
@@ -271,6 +291,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${DataFoundationLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds:
           - Fn::ImportValue: !Sub '${EnvironmentName}-PrivateSubnet1Id'
@@ -281,23 +302,56 @@ Resources:
         Variables:
           AURORA_ENDPOINT:
             Fn::ImportValue: !Sub '${EnvironmentName}-AuroraClusterEndpoint'
-          # TODO 7.2 — flip the EnforceRls condition (top of file) to switch this
-          # between the postgres owner secret (RLS bypassed) and the app_user
-          # secret (RLS enforced). No edit needed here.
-          AURORA_SECRET_ARN: !If
-            - EnforceRls
-            - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
-            - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          # RLS toggle is at RUNTIME (TODO 7.2): both secrets are wired here and
+          # the Lambda picks one based on the RlsParameter SSM flag. No redeploy
+          # to flip RLS — so this config never changes and the published version
+          # stays valid for provisioned concurrency.
+          AURORA_SECRET_ARN:                                    # postgres owner (RLS bypassed)
+            Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          APP_AURORA_SECRET_ARN:                                # app_user (RLS enforced)
+            Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
           AURORA_USERNAME: postgres
           KNOWLEDGE_BASE_ID:
             Fn::ImportValue: !Sub '${EnvironmentName}-KnowledgeBaseId'
+          # JWT verification: validate the propagated Cognito access token
+          # (issuer = this pool, client_id = the login client) before trusting
+          # account_id/role for RLS.
+          COGNITO_USER_POOL_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserPoolId'
+          COGNITO_USER_LOGIN_CLIENT_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserLoginClientId'
 
   # Lambda permission for Gateway to invoke
+  # Published version + 'live' alias with provisioned concurrency, so the Gateway
+  # invokes a warm instance (no cold start, so JWKS fetch + JWT verify never hit
+  # the request path). The Gateway target points at the alias ARN; AgentCore's
+  # lambdaArn pattern accepts a qualifier. Note: AWS::Lambda::Version snapshots the
+  # function at deploy — CloudFormation replaces it when the function's code/config
+  # changes, so each deploy publishes a fresh version the alias then points to.
+  DataFoundationVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref DataFoundationLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  DataFoundationAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref DataFoundationLambda
+      FunctionVersion: !GetAtt DataFoundationVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
+
   DataFoundationLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref DataFoundationLambda
+      # Grant invoke on the alias (qualified): the Gateway invokes the 'live'
+      # alias, so the resource policy must be on that qualifier. !Ref <Alias>
+      # resolves to the qualified ARN (…:function:name:live).
+      FunctionName: !Ref DataFoundationAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -314,12 +368,29 @@ Resources:
       CompatibleRuntimes:
         - python3.12
 
+  # PyJWT + cryptography layer (created only if not provided). Used by the tool
+  # Lambdas to verify the propagated Cognito access token (RS256 via JWKS) for
+  # defense-in-depth before trusting account_id/role for RLS.
+  PyJwtLayer:
+    Type: AWS::Lambda::LayerVersion
+    Condition: NeedsPyJwtLayer
+    Properties:
+      LayerName: !Sub ${EnvironmentName}-pyjwt
+      Description: PyJWT + cryptography for Python 3.12
+      Content:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub ${ArtifactsPrefix}layers/pyjwt-py312.zip
+      CompatibleRuntimes:
+        - python3.12
+
   #============================================================================
   # Gateway Target — DataTools (29 analytics tools)
   #============================================================================
   DataToolsTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
-    DependsOn: Gateway
+    DependsOn:
+      - Gateway
+      - DataFoundationLambdaPermission
     Properties:
       GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
       Name: PrebakedSQL
@@ -329,7 +400,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt DataFoundationLambda.Arn
+            LambdaArn: !Ref DataFoundationAlias
             ToolSchema:
               InlinePayload:
                 - Name: check_db_status_tool
@@ -498,6 +569,10 @@ Resources:
                 Resource:
                   - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
                   - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+              # Read the runtime RLS feature flag (TODO 7.2 toggle).
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
 
   ApiIntegLambda:
     Type: AWS::Lambda::Function
@@ -513,6 +588,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${ApiIntegLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds:
           - Fn::ImportValue: !Sub '${EnvironmentName}-PrivateSubnet1Id'
@@ -523,19 +599,42 @@ Resources:
         Variables:
           AURORA_ENDPOINT:
             Fn::ImportValue: !Sub '${EnvironmentName}-AuroraClusterEndpoint'
-          # TODO 7.2 — flip the EnforceRls condition (top of file) to switch this
-          # between the postgres owner secret (RLS bypassed) and the app_user
-          # secret (RLS enforced). No edit needed here.
-          AURORA_SECRET_ARN: !If
-            - EnforceRls
-            - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
-            - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          # RLS toggle is at RUNTIME (TODO 7.2): both secrets are wired here and
+          # the Lambda picks one based on the RlsParameter SSM flag. No redeploy
+          # to flip RLS — so this config never changes and the published version
+          # stays valid for provisioned concurrency.
+          AURORA_SECRET_ARN:                                    # postgres owner (RLS bypassed)
+            Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          APP_AURORA_SECRET_ARN:                                # app_user (RLS enforced)
+            Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
+          # JWT verification: validate the propagated Cognito access token
+          # before trusting account_id/role for RLS.
+          COGNITO_USER_POOL_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserPoolId'
+          COGNITO_USER_LOGIN_CLIENT_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserLoginClientId'
+
+  ApiIntegVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref ApiIntegLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  ApiIntegAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ApiIntegLambda
+      FunctionVersion: !GetAtt ApiIntegVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
 
   ApiIntegLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref ApiIntegLambda
+      FunctionName: !Ref ApiIntegAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -556,7 +655,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt ApiIntegLambda.Arn
+            LambdaArn: !Ref ApiIntegAlias
             ToolSchema:
               InlinePayload:
                 - Name: create_booking_tool
@@ -599,6 +698,10 @@ Resources:
                 Resource:
                   - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
                   - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+              # Read the runtime RLS feature flag (TODO 7.2 toggle).
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
               - Effect: Allow
                 Action:
                   - glue:GetTables
@@ -626,6 +729,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${CustomSqlLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds:
           - Fn::ImportValue: !Sub '${EnvironmentName}-PrivateSubnet1Id'
@@ -636,23 +740,46 @@ Resources:
         Variables:
           AURORA_ENDPOINT:
             Fn::ImportValue: !Sub '${EnvironmentName}-AuroraClusterEndpoint'
-          # TODO 7.2 — flip the EnforceRls condition (top of file) to switch this
-          # between the postgres owner secret (RLS bypassed) and the app_user
-          # secret (RLS enforced). No edit needed here.
-          AURORA_SECRET_ARN: !If
-            - EnforceRls
-            - Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
-            - Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          # RLS toggle is at RUNTIME (TODO 7.2): both secrets are wired here and
+          # the Lambda picks one based on the RlsParameter SSM flag. No redeploy
+          # to flip RLS — so this config never changes and the published version
+          # stays valid for provisioned concurrency.
+          AURORA_SECRET_ARN:                                    # postgres owner (RLS bypassed)
+            Fn::ImportValue: !Sub '${EnvironmentName}-DatabaseSecretArn'
+          APP_AURORA_SECRET_ARN:                                # app_user (RLS enforced)
+            Fn::ImportValue: !Sub '${EnvironmentName}-AppDatabaseSecretArn'
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
           GLUE_DATABASE:
             Fn::ImportValue: !Sub '${EnvironmentName}-GlueDatabaseName'
           BEDROCK_KB_ID:
             Fn::ImportValue: !Sub '${EnvironmentName}-KnowledgeBaseId'
+          # JWT verification: validate the propagated Cognito access token
+          # before trusting account_id/role for RLS.
+          COGNITO_USER_POOL_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserPoolId'
+          COGNITO_USER_LOGIN_CLIENT_ID:
+            Fn::ImportValue: !Sub '${EnvironmentName}-UserLoginClientId'
+
+  CustomSqlVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref CustomSqlLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  CustomSqlAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref CustomSqlLambda
+      FunctionVersion: !GetAtt CustomSqlVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
 
   CustomSqlLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref CustomSqlLambda
+      FunctionName: !Ref CustomSqlAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -673,7 +800,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt CustomSqlLambda.Arn
+            LambdaArn: !Ref CustomSqlAlias
             ToolSchema:
               InlinePayload:
                 - Name: text_to_sql_tool

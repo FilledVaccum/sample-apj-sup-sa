@@ -328,6 +328,7 @@ else
   KEY_PAIRS+=("ObservabilityLambdaKey=lambdas/$(latest lambdas/observability_setup-)")
   KEY_PAIRS+=("AmplifyLambdaKey=lambdas/$(latest lambdas/amplify_hosting-)")
   KEY_PAIRS+=("InterceptorLambdaKey=lambdas/$(latest lambdas/gateway_interceptor-)")
+  KEY_PAIRS+=("DataFoundationLambdaKey=lambdas/$(latest lambdas/datafoundation-)")
   KEY_PAIRS+=("ApiIntegLambdaKey=lambdas/$(latest lambdas/api_integration_toolset-)")
   KEY_PAIRS+=("CustomSqlLambdaKey=lambdas/$(latest lambdas/custom_sql_toolset-)")
   KEY_PAIRS+=("SemanticLayerLambdaKey=lambdas/$(latest lambdas/semantic_layer_toolset-)")
@@ -337,8 +338,8 @@ else
 fi
 
 REQUIRED_KEYS=(DatabaseInitLambdaKey GlueCrawlerLambdaKey BedrockKBLambdaKey
-  ObservabilityLambdaKey AmplifyLambdaKey InterceptorLambdaKey ApiIntegLambdaKey
-  CustomSqlLambdaKey SemanticLayerLambdaKey UIBuildKey AgentCodeS3Key)
+  ObservabilityLambdaKey AmplifyLambdaKey DataFoundationLambdaKey InterceptorLambdaKey
+  ApiIntegLambdaKey CustomSqlLambdaKey SemanticLayerLambdaKey UIBuildKey AgentCodeS3Key)
 for k in "${REQUIRED_KEYS[@]}"; do
   [ -n "$(key_val "$k")" ] || die "Could not resolve artifact key: $k"
 done

@@ -105,17 +105,36 @@ Parameters:
     Default: ''
     Description: ARN of existing psycopg2 Lambda layer (leave empty to create one)
 
+  PyJwtLayerArn:
+    Type: String
+    Default: ''
+    Description: ARN of existing PyJWT+cryptography Lambda layer (leave empty to create one)
+
   GatewayName:
     Type: String
     Default: AgenticAnalyticsMCPGateway
 
 Conditions:
   NeedsPsycopg2Layer: !Equals [!Ref Psycopg2LayerArn, '']
+  NeedsPyJwtLayer: !Equals [!Ref PyJwtLayerArn, '']
   HasKnowledgeBase: !Not [!Equals [!Ref KnowledgeBaseId, '']]
   HasSemanticLayer: !Not [!Equals [!Ref CubePrivateIp, '']]
   GuardrailEnabled: !Equals [!Ref EnableGuardrail, 'true']
 
 Resources:
+  #============================================================================
+  # Row-Level Security feature flag (runtime toggle, read by the SQL Lambdas).
+  # Demo mode seeds this 'enabled' so RLS is enforced from the start. The tool
+  # Lambdas read it at runtime (cached) and pick the app_user vs postgres secret.
+  #============================================================================
+  RlsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${EnvironmentName}/rls-mode
+      Type: String
+      Value: enabled
+      Description: RLS enforcement toggle read at runtime by the SQL tool Lambdas (enabled|disabled)
+
   #============================================================================
   # DataFoundation Lambda (27 analytics tools)
   #============================================================================
@@ -142,6 +161,10 @@ Resources:
                 Resource:
                   - !Ref DatabaseSecretArn
                   - !Ref AppDatabaseSecretArn
+              # Read the runtime RLS feature flag.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
@@ -162,6 +185,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${DataFoundationLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds: !Ref SubnetIds
         SecurityGroupIds:
@@ -169,16 +193,48 @@ Resources:
       Environment:
         Variables:
           AURORA_ENDPOINT: !Ref AuroraEndpoint
-          AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn
+          # RLS toggle is at RUNTIME via the RlsParameter SSM flag (seeded
+          # 'enabled' for demo). Both secrets wired; the Lambda picks one.
+          AURORA_SECRET_ARN: !Ref DatabaseSecretArn            # postgres owner (RLS bypassed)
+          APP_AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn     # app_user (RLS enforced)
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
           AURORA_USERNAME: postgres
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          # JWT verification: validate the propagated Cognito access token
+          # before trusting account_id/role for RLS.
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_USER_LOGIN_CLIENT_ID: !Ref CognitoClientId
 
-  # Lambda permission for Gateway to invoke
+  # Published version + 'live' alias with provisioned concurrency, so the Gateway
+  # invokes a warm instance (no cold start, so the PyJWT import + first-call JWKS
+  # fetch never hit the request path). The Gateway target points at the alias ARN;
+  # AgentCore's lambdaArn pattern accepts a qualifier. AWS::Lambda::Version snapshots
+  # the function at deploy — CloudFormation republishes it when the function's
+  # code/config changes (the Lambda S3 key is hash-versioned, so a code edit flips
+  # the key → new Version → alias rolls forward; no stale-code trap).
+  DataFoundationVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref DataFoundationLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  DataFoundationAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref DataFoundationLambda
+      FunctionVersion: !GetAtt DataFoundationVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
+
+  # Lambda permission for Gateway to invoke. Granted on the alias (qualified): the
+  # Gateway invokes the 'live' alias, so the resource policy must be on that
+  # qualifier. !Ref <Alias> resolves to the qualified ARN (…:function:name:live).
   DataFoundationLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref DataFoundationLambda
+      FunctionName: !Ref DataFoundationAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -192,6 +248,21 @@ Resources:
       Content:
         S3Bucket: !Ref ArtifactsBucket
         S3Key: !Sub ${ArtifactsPrefix}layers/psycopg2-py312.zip
+      CompatibleRuntimes:
+        - python3.12
+
+  # PyJWT + cryptography layer (created only if not provided). The tool Lambdas
+  # verify the propagated Cognito access token (RS256 via JWKS) before trusting
+  # account_id/role for RLS.
+  PyJwtLayer:
+    Type: AWS::Lambda::LayerVersion
+    Condition: NeedsPyJwtLayer
+    Properties:
+      LayerName: !Sub ${EnvironmentName}-pyjwt
+      Description: PyJWT + cryptography for Python 3.12
+      Content:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub ${ArtifactsPrefix}layers/pyjwt-py312.zip
       CompatibleRuntimes:
         - python3.12
 
@@ -261,6 +332,10 @@ Resources:
                 Resource:
                   - !Ref DatabaseSecretArn
                   - !Ref AppDatabaseSecretArn
+              # Read the runtime RLS feature flag.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
 
   ApiIntegLambda:
     Type: AWS::Lambda::Function
@@ -276,6 +351,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${ApiIntegLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds: !Ref SubnetIds
         SecurityGroupIds:
@@ -283,13 +359,39 @@ Resources:
       Environment:
         Variables:
           AURORA_ENDPOINT: !Ref AuroraEndpoint
-          AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn
+          # RLS toggle is at RUNTIME via the RlsParameter SSM flag (seeded
+          # 'enabled' for demo). Both secrets wired; the Lambda picks one.
+          AURORA_SECRET_ARN: !Ref DatabaseSecretArn            # postgres owner (RLS bypassed)
+          APP_AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn     # app_user (RLS enforced)
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
+          # JWT verification: validate the propagated Cognito access token
+          # before trusting account_id/role for RLS.
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_USER_LOGIN_CLIENT_ID: !Ref CognitoClientId
+
+  # Published version + 'live' alias with provisioned concurrency (warm; no cold
+  # start on the PyJWT import / JWKS fetch). See DataFoundationVersion for the
+  # hash-versioned-key / republish rationale.
+  ApiIntegVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref ApiIntegLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  ApiIntegAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ApiIntegLambda
+      FunctionVersion: !GetAtt ApiIntegVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
 
   ApiIntegLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref ApiIntegLambda
+      FunctionName: !Ref ApiIntegAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -319,6 +421,10 @@ Resources:
                 Resource:
                   - !Ref DatabaseSecretArn
                   - !Ref AppDatabaseSecretArn
+              # Read the runtime RLS feature flag.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/rls-mode
               - Effect: Allow
                 Action:
                   - glue:GetTables
@@ -346,6 +452,7 @@ Resources:
         S3Key: !Sub ${ArtifactsPrefix}${CustomSqlLambdaKey}
       Layers:
         - !If [NeedsPsycopg2Layer, !Ref Psycopg2Layer, !Ref Psycopg2LayerArn]
+        - !If [NeedsPyJwtLayer, !Ref PyJwtLayer, !Ref PyJwtLayerArn]
       VpcConfig:
         SubnetIds: !Ref SubnetIds
         SecurityGroupIds:
@@ -353,15 +460,41 @@ Resources:
       Environment:
         Variables:
           AURORA_ENDPOINT: !Ref AuroraEndpoint
-          AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn
+          # RLS toggle is at RUNTIME via the RlsParameter SSM flag (seeded
+          # 'enabled' for demo). Both secrets wired; the Lambda picks one.
+          AURORA_SECRET_ARN: !Ref DatabaseSecretArn            # postgres owner (RLS bypassed)
+          APP_AURORA_SECRET_ARN: !Ref AppDatabaseSecretArn     # app_user (RLS enforced)
+          RLS_PARAM_NAME: !Sub /${EnvironmentName}/rls-mode
           AURORA_DATABASE: timely_unicorn
           GLUE_DATABASE: !Ref GlueDatabaseName
           BEDROCK_KB_ID: !Ref KnowledgeBaseId
+          # JWT verification: validate the propagated Cognito access token
+          # before trusting account_id/role for RLS.
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_USER_LOGIN_CLIENT_ID: !Ref CognitoClientId
+
+  # Published version + 'live' alias with provisioned concurrency (warm; no cold
+  # start on the PyJWT import / JWKS fetch). See DataFoundationVersion for the
+  # hash-versioned-key / republish rationale.
+  CustomSqlVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref CustomSqlLambda
+      Description: Version fronted by the live alias for provisioned concurrency
+
+  CustomSqlAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref CustomSqlLambda
+      FunctionVersion: !GetAtt CustomSqlVersion.Version
+      Name: live
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
 
   CustomSqlLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref CustomSqlLambda
+      FunctionName: !Ref CustomSqlAlias
       Action: lambda:InvokeFunction
       Principal: bedrock-agentcore.amazonaws.com
 
@@ -485,7 +618,9 @@ Resources:
   #============================================================================
   DataToolsTarget:
     Type: AWS::BedrockAgentCore::GatewayTarget
-    DependsOn: Gateway
+    DependsOn:
+      - Gateway
+      - DataFoundationLambdaPermission
     Properties:
       GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
       Name: PrebakedSQL
@@ -495,7 +630,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt DataFoundationLambda.Arn
+            LambdaArn: !Ref DataFoundationAlias
             ToolSchema:
               InlinePayload:
                 - Name: check_db_status_tool
@@ -655,7 +790,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt ApiIntegLambda.Arn
+            LambdaArn: !Ref ApiIntegAlias
             ToolSchema:
               InlinePayload:
                 - Name: create_booking_tool
@@ -689,7 +824,7 @@ Resources:
       TargetConfiguration:
         Mcp:
           Lambda:
-            LambdaArn: !GetAtt CustomSqlLambda.Arn
+            LambdaArn: !Ref CustomSqlAlias
             ToolSchema:
               InlinePayload:
                 - Name: text_to_sql_tool
