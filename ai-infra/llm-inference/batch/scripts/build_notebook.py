@@ -605,11 +605,24 @@ def cells() -> list[dict]:
             """\
             # Domain-specific system prompt shared across all records — one fixed
             # system prompt is exactly what prefix caching was designed for.
-            # We import it from the benchmark's per-model package so smoke,
-            # batch and benchmark stay in sync.
-            import sys as _sys
-            _sys.path.insert(0, str(PROJECT_ROOT.parent / "benchmark"))
-            from models.""" + c.package + """ import SYSTEM_PROMPT  # noqa: E402
+            # We reuse the per-model SYSTEM_PROMPT from the benchmark tree so
+            # smoke, batch and benchmark stay in sync.
+            #
+            # Section 0 already imported the *batch* `models` package, so
+            # `models.<name>` is cached in sys.modules. The benchmark tree has a
+            # separate `models` package of the same name, so a plain
+            # `from models.<name> import SYSTEM_PROMPT` would resolve to the
+            # cached batch package (which has no SYSTEM_PROMPT) and raise
+            # ImportError. Load the benchmark prompts.py directly by file path
+            # under a unique module name to dodge the sys.modules collision —
+            # and to skip the benchmark package's __init__, which imports
+            # vllm_ec2_bench (not on this notebook's path).
+            import importlib.util as _ilu  # noqa: E402
+            _prompts_path = PROJECT_ROOT.parent / "benchmark" / "models" / """ + repr(c.package) + """ / "prompts.py"
+            _spec = _ilu.spec_from_file_location(""" + repr(f"_bench_{c.package}_prompts") + """, _prompts_path)
+            _bench_prompts = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_bench_prompts)
+            SYSTEM_PROMPT = _bench_prompts.SYSTEM_PROMPT
 
             # Source: one of the synthesized seed files for this model's domain.
             src_file = PROJECT_ROOT.parent / "sample-data" / """ + repr(c.domain) + """ / """ + repr(c.sample_data_file) + """
