@@ -150,9 +150,13 @@ def test_filler_off_by_default(monkeypatch):
 
 
 def test_filler_on_when_enabled(monkeypatch):
-    """VOICE_SPOKEN_FILLER=true restores the spoken acknowledgement."""
+    """VOICE_SPOKEN_FILLER=true + VOICE_DYNAMIC_ACK=false restores the STATIC
+    spoken acknowledgement. (The default is now dynamic ack — the model's own
+    streamed <ack> — which is asserted separately; the static _FILLERS path only
+    fires when dynamic ack is explicitly disabled.)"""
     chunks = [_sse("<speak>Hi.</speak>")]
-    proc = _make_processor(monkeypatch, chunks, VOICE_SPOKEN_FILLER="true")
+    proc = _make_processor(monkeypatch, chunks,
+                           VOICE_SPOKEN_FILLER="true", VOICE_DYNAMIC_ACK="false")
     frame = _ctx_frame(monkeypatch)
 
     asyncio.run(proc.process_frame(frame, FrameDirection.DOWNSTREAM))

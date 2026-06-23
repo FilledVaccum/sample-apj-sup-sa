@@ -323,6 +323,22 @@ if _VOICE_RUNTIME_MODE == "agentcore":
                 )
         return ice_servers
 
+    def _bearer_from_headers(context):
+        """Extract the user's Bearer token from the runtime request headers.
+
+        The voice runtime's CustomJWTAuthorizer validates the Cognito access token
+        at the edge, and RequestHeaderConfiguration.RequestHeaderAllowlist passes
+        `Authorization` through to this container — exactly like the Strands
+        analytics agent (unicorn_rental_agent.py). This header IS the user identity
+        used for RBAC/RLS, so the signaling proxy no longer duplicates the token in
+        the offer body.
+        """
+        headers = getattr(context, "request_headers", None) or {} if context else {}
+        auth = headers.get("Authorization") or headers.get("authorization")
+        if auth and auth.startswith("Bearer "):
+            return auth[len("Bearer "):].strip()
+        return auth.strip() if auth else None
+
     async def _run_webrtc_session(connection, user_token, runtime_session_id):
         """Run the full pipeline over a SmallWebRTC connection, kept alive on /ping."""
         task_id = app.add_async_task("voice_agent")
@@ -352,16 +368,21 @@ if _VOICE_RUNTIME_MODE == "agentcore":
         kick off the pipeline, and stream the SDP answer back over SSE between
         ANSWER:START / ANSWER:END sentinels (the SPA reads the {"answer":...} line).
         ICE candidates trickle in as separate POSTs and are applied to the live peer.
-        The per-user JWT (gateway_token) + shared runtimeSessionId travel in the offer
-        body so the pipeline applies the real user's RBAC/RLS and shares one Memory
-        thread with the text chat.
+
+        The per-user JWT is read from the request headers (context.request_headers
+        ['Authorization'], validated by the runtime's JWT authorizer and passed
+        through via the header allowlist) — same as the Strands agent. The shared
+        runtimeSessionId still travels in the offer body. (For backward-compat during
+        a rollout, a gateway_token in the body is honoured as a fallback, but the
+        signaling proxy no longer sends one.)
         """
         global _request_handler
         rtype = payload.get("type", "unknown")
         data = payload.get("data") or {}
 
         if rtype == "offer":
-            user_token = data.get("gateway_token")
+            # Header is the source of truth; body gateway_token is a transitional fallback.
+            user_token = _bearer_from_headers(context) or data.get("gateway_token")
             runtime_session_id = data.get("runtimeSessionId")
             if runtime_session_id:
                 logger.info(f"[voice] offer for session {runtime_session_id[:24]}...")

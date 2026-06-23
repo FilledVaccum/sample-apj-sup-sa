@@ -92,16 +92,52 @@ def test_offer_yields_sse_answer_sentinels(monkeypatch):
     assert out[-1] == {"status": "ANSWER:END"}
 
 
-def test_offer_forwards_token_and_session(monkeypatch):
+class _FakeContext:
+    """Stand-in for the AgentCore runtime context (exposes request_headers)."""
+
+    def __init__(self, headers):
+        self.request_headers = headers
+
+
+def test_offer_reads_token_from_headers(monkeypatch):
+    """The per-user JWT now comes from the Authorization header (the signaling proxy
+    no longer duplicates it in the body), and the shared session id from the body."""
     captured = _install_common_stubs(monkeypatch)
     monkeypatch.setattr(bot, "SmallWebRTCRequestHandler", _FakeHandler)
 
-    payload = {"type": "offer", "data": {"gateway_token": "user-jwt-xyz",
-                                         "runtimeSessionId": "shared-sess-abc"}}
-    asyncio.run(_drain(bot.agentcore_entrypoint(payload, None)))
+    ctx = _FakeContext({"Authorization": "Bearer user-jwt-xyz"})
+    payload = {"type": "offer", "data": {"runtimeSessionId": "shared-sess-abc"}}
+    asyncio.run(_drain(bot.agentcore_entrypoint(payload, ctx)))
 
     assert captured["user_token"] == "user-jwt-xyz"
     assert captured["runtime_session_id"] == "shared-sess-abc"
+
+
+def test_offer_body_token_is_fallback_when_no_header(monkeypatch):
+    """Backward-compat: if no Authorization header is present, a body gateway_token
+    is still honoured (covers the deploy window before the proxy update lands)."""
+    captured = _install_common_stubs(monkeypatch)
+    monkeypatch.setattr(bot, "SmallWebRTCRequestHandler", _FakeHandler)
+
+    payload = {"type": "offer", "data": {"gateway_token": "legacy-body-jwt",
+                                         "runtimeSessionId": "shared-sess-abc"}}
+    asyncio.run(_drain(bot.agentcore_entrypoint(payload, None)))
+
+    assert captured["user_token"] == "legacy-body-jwt"
+    assert captured["runtime_session_id"] == "shared-sess-abc"
+
+
+def test_offer_header_takes_precedence_over_body(monkeypatch):
+    """If both are present, the header wins (the body copy is being retired)."""
+    captured = _install_common_stubs(monkeypatch)
+    monkeypatch.setattr(bot, "SmallWebRTCRequestHandler", _FakeHandler)
+
+    ctx = _FakeContext({"authorization": "Bearer header-wins"})
+    payload = {"type": "offer", "data": {"gateway_token": "body-loses",
+                                         "runtimeSessionId": "s"}}
+    asyncio.run(_drain(bot.agentcore_entrypoint(payload, ctx)))
+
+    assert captured["user_token"] == "header-wins"
 
 
 def test_ice_candidates_dispatch(monkeypatch):

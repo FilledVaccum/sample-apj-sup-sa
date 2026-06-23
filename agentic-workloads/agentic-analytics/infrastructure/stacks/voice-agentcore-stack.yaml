@@ -527,15 +527,17 @@ Resources:
                   return _resp(400, {"error": "invalid JSON body"})
               # The SmallWebRTC transport sends {sdp,type,pc_id,restart_pc} for the
               # offer (POST) and an ICE payload for trickle (PATCH). Wrap both into the
-              # runtime's {type, data} contract; the offer also carries the user token
-              # + shared session id so the pipeline applies RBAC/RLS + one Memory thread.
+              # runtime's {type, data} contract. The user token is forwarded ONLY as the
+              # Authorization: Bearer header (see _call_runtime) — the runtime's JWT
+              # authorizer validates it and the header allowlist passes it to the bot,
+              # so we no longer duplicate it in the body. The shared session id still
+              # rides in the offer data so voice + text share one Memory thread.
               try:
                   if method == "PATCH":
                       ans = _call_runtime(token, session_id,
                                           {"type": "ice-candidates", "data": body})
                       return _resp(200, {"status": "ok"})
                   data = dict(body)
-                  data["gateway_token"] = token
                   if session_id:
                       data["runtimeSessionId"] = session_id
                   answer = _call_runtime(token, session_id, {"type": "offer", "data": data})
