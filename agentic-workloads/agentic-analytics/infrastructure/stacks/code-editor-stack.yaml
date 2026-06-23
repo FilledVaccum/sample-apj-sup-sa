@@ -622,6 +622,8 @@ Resources:
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
     DependsOn: CodeEditorInstance
+    # checkov:skip=CKV_AWS_174: uses the default *.cloudfront.net viewer cert
+    #   (already TLS 1.2+); MinimumProtocolVersion only applies with a custom ACM cert.
     Properties:
       DistributionConfig:
         Enabled: true
@@ -631,7 +633,9 @@ Resources:
           CachePolicyId: !Ref CloudFrontCachePolicy
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
           TargetOriginId: code-editor-origin
-          ViewerProtocolPolicy: allow-all
+          # Force viewers onto HTTPS — the Code Editor URL carries an auth token,
+          # so it must never be served over plaintext HTTP. (CKV_AWS_34)
+          ViewerProtocolPolicy: redirect-to-https
         Origins:
           - Id: code-editor-origin
             DomainName: !GetAtt CodeEditorInstance.PublicDnsName
@@ -725,7 +729,7 @@ Resources:
                   return
               try:
                   p = event['ResourceProperties']
-                  secret = boto3.client('secretsmanager').get_secret_value(SecretId=p['SecretId'])
+                  secret = boto3.client('secretsmanager').get_secret_value(SecretId=p['SecretId'])  # checkov:skip=CKV_SECRET_6: false positive — reads a CFN-generated password from Secrets Manager at runtime; no literal secret here
                   password = json.loads(secret['SecretString'])['password']
                   url = f"https://{p['Domain']}/?tkn={password}&folder={p['Folder']}"
                   register_cognito_callback(p.get('CognitoUserPoolId'), p.get('CognitoUserLoginClientId'), p.get('Domain'))

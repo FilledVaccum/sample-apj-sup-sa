@@ -152,7 +152,10 @@ class TestEndToEndWorkflow:
             if os.path.exists(filepath):
                 with open(filepath, 'r') as f:
                     try:
-                        yaml.load(f, Loader=CFLoader)
+                        # CFLoader subclasses yaml.SafeLoader (only adds CFN tag
+                        # constructors) so this cannot instantiate arbitrary
+                        # objects — safe despite the generic yaml.load name. (B506)
+                        yaml.load(f, Loader=CFLoader)  # nosec B506 - CFLoader is a SafeLoader subclass
                     except yaml.YAMLError as e:
                         pytest.fail(f"Invalid YAML in {template}: {e}")
 

@@ -53,6 +53,19 @@ CONTEXT_DIR = os.path.join(os.path.dirname(__file__), "bot_context")
 DEFAULT_REGION = os.environ.get("PCC_REGION", "us-west")  # PCC region label, not AWS
 
 
+def _https_urlopen(req_or_url, timeout):
+    """urlopen that REFUSES any scheme other than https.
+
+    Every URL here is an https Pipecat Cloud API endpoint, a CFN-provided https
+    ResponseURL, or an https presigned-S3 upload URL — pin the scheme so a
+    malformed value can't read file:// or a custom scheme (closes B310).
+    """
+    full_url = req_or_url.full_url if isinstance(req_or_url, urllib.request.Request) else req_or_url
+    if not full_url.lower().startswith("https://"):
+        raise ValueError(f"refusing non-https URL: {full_url[:60]}")
+    return urllib.request.urlopen(req_or_url, timeout=timeout)  # nosec B310 - scheme pinned to https above
+
+
 # ── tiny REST helper ─────────────────────────────────────────────────────────
 def _req(method, url, token, body=None, raw=None, headers=None):
     h = {"Authorization": f"Bearer {token}"}
@@ -65,7 +78,7 @@ def _req(method, url, token, body=None, raw=None, headers=None):
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _https_urlopen(req, timeout=60) as r:
             txt = r.read().decode("utf-8", "ignore")
             return r.status, (json.loads(txt) if txt.strip().startswith(("{", "[")) else txt)
     except urllib.error.HTTPError as e:
@@ -121,7 +134,7 @@ def _cloud_build(token):
     # presigned S3 POST — unauthenticated (no bearer), just the form
     req = urllib.request.Request(up["uploadUrl"], data=body, method="POST",
                                  headers={"Content-Type": ctype})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with _https_urlopen(req, timeout=120) as r:
         if r.status not in (200, 201, 204):
             raise RuntimeError(f"context upload failed: {r.status}")
     st, bc = _req("POST", f"{API}/builds", token,
@@ -208,7 +221,7 @@ def _send(event, context, status, data=None, reason=None, pid=None):
     }).encode()
     req = urllib.request.Request(event["ResponseURL"], data=body, method="PUT",
                                  headers={"Content-Type": ""})
-    urllib.request.urlopen(req, timeout=30)
+    _https_urlopen(req, timeout=30)
 
 
 # Sentinel physical-id returned ONLY when a Create fails before it produced a

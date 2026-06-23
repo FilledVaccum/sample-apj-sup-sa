@@ -29,6 +29,20 @@ import boto3
 from jose import jwt
 from jose.utils import base64url_decode  # noqa: F401  (ensures jose is present)
 
+
+def _https_urlopen(req_or_url, timeout):
+    """urlopen that REFUSES any scheme other than https.
+
+    Closes the file:// / custom-scheme risk that Bandit B310 flags: an attacker
+    who could influence a URL must not be able to make us read a local file or a
+    non-TLS endpoint. Every URL here is a hardcoded https Cognito / Pipecat Cloud
+    endpoint, but we enforce it explicitly so the guarantee survives refactors.
+    """
+    full_url = req_or_url.full_url if isinstance(req_or_url, urllib.request.Request) else req_or_url
+    if not full_url.lower().startswith("https://"):
+        raise ValueError(f"refusing non-https URL: {full_url[:60]}")
+    return urllib.request.urlopen(req_or_url, timeout=timeout)  # nosec B310 - scheme pinned to https above
+
 _JWKS_CACHE = {"keys": None, "fetched_at": 0}
 _JWKS_TTL = 3600
 
@@ -53,7 +67,7 @@ def _jwks(pool_id: str, region: str):
     if _JWKS_CACHE["keys"] and now - _JWKS_CACHE["fetched_at"] < _JWKS_TTL:
         return _JWKS_CACHE["keys"]
     url = f"https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/jwks.json"
-    with urllib.request.urlopen(url, timeout=5) as r:
+    with _https_urlopen(url, timeout=5) as r:
         keys = json.loads(r.read())["keys"]
     _JWKS_CACHE.update(keys=keys, fetched_at=now)
     return keys
@@ -157,7 +171,7 @@ def handler(event, _context):
                  "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with _https_urlopen(req, timeout=20) as r:
             data = json.loads(r.read())
     except urllib.error.HTTPError as e:  # noqa: BLE001
         return _resp(502, {"error": "pcc start failed",

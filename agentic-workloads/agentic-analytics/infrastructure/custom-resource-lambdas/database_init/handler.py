@@ -9,6 +9,7 @@ Can be invoked:
 import boto3
 import json
 import os
+import re
 import urllib.request
 
 # Configuration from environment
@@ -157,8 +158,18 @@ def load_csv_from_s3(resource_arn, secret_arn, database, bucket, key, table, col
         return 0
     
     cols = columns or list(rows[0].keys())
+    # The VALUES are bound parameters (never interpolated); only the table/column
+    # IDENTIFIERS are formatted into the statement, and those come from the bundled
+    # schema/CSV headers — not user input. Still, validate them against a strict
+    # identifier pattern so a malformed CSV header can never inject SQL. (B608)
+    _ident = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+    if not _ident.match(table):
+        raise ValueError(f"unsafe table identifier: {table!r}")
+    bad = [c for c in cols if not _ident.match(c)]
+    if bad:
+        raise ValueError(f"unsafe column identifier(s): {bad!r}")
     placeholders = ', '.join([f":{c}{get_cast(c, table)}" for c in cols])
-    sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
+    sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"  # nosec B608 - identifiers validated above; values are bound params
     
     BATCH_SIZE = 100
     count = 0
@@ -194,7 +205,7 @@ def load_csv_from_s3(resource_arn, secret_arn, database, bucket, key, table, col
                 try:
                     execute_sql(resource_arn, secret_arn, database, sql, params)
                     count += 1
-                except:
+                except Exception:  # noqa: BLE001 - per-row best-effort load; skip a bad/duplicate row and continue
                     pass
     
     print(f"  [OK] Loaded {count} rows into {table}")
@@ -332,13 +343,17 @@ def send_cfn_response(event, context, status, data=None, reason=None):
         'Data': data or {}
     }
     
+    # CFN always supplies an https presigned-S3 ResponseURL; verify the scheme
+    # before opening it (closes the B310 file://-scheme risk).
+    if not event['ResponseURL'].lower().startswith('https://'):
+        raise ValueError('ResponseURL must be https')
     req = urllib.request.Request(
         event['ResponseURL'],
         data=json.dumps(response_body).encode('utf-8'),
         headers={'Content-Type': 'application/json'},
         method='PUT'
     )
-    urllib.request.urlopen(req)
+    urllib.request.urlopen(req)  # nosec B310 - https scheme verified above
 
 
 def lambda_handler(event, context):

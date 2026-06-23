@@ -76,7 +76,10 @@ def create_deployment_zip(source_dir, output_path=None):
     print(f"Creating deployment ZIP from {source_dir}")
     
     if output_path is None:
-        output_path = tempfile.mktemp(suffix=".zip")
+        # mkstemp (not the deprecated, race-prone mktemp) atomically creates the
+        # file and returns an open fd; close it since we re-open by path to write.
+        fd, output_path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
     
     with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file_path in source_dir.rglob('*'):

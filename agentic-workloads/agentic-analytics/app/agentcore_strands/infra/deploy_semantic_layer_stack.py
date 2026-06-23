@@ -47,7 +47,12 @@ try:
     )
 except ImportError:
     print("Installing bedrock-agentcore-starter-toolkit...")
-    os.system(f"{sys.executable} -m pip install bedrock-agentcore-starter-toolkit -q")
+    # Use subprocess with an argument list (no shell) so there is no command
+    # injection surface — the args are fixed literals, not an interpolated string.
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install",
+        "bedrock-agentcore-starter-toolkit", "-q",
+    ])
     from bedrock_agentcore_starter_toolkit.operations.gateway.client import (
         GatewayClient, create_gateway_execution_role
     )

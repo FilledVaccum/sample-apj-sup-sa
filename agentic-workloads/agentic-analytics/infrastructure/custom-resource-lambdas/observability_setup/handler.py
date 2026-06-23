@@ -23,9 +23,13 @@ def send_cfn_response(event, context, status, data=None, reason=None):
         'LogicalResourceId': event['LogicalResourceId'],
         'Data': data or {}
     })
+    # CFN always supplies an https presigned-S3 ResponseURL; verify the scheme
+    # before opening it (closes the B310 file://-scheme risk).
+    if not event['ResponseURL'].lower().startswith('https://'):
+        raise ValueError('ResponseURL must be https')
     req = urllib.request.Request(event['ResponseURL'], data=body.encode(), method='PUT',
                                 headers={'Content-Type': ''})
-    urllib.request.urlopen(req)
+    urllib.request.urlopen(req)  # nosec B310 - https scheme verified above
 
 
 def enable_transaction_search(account_id):
