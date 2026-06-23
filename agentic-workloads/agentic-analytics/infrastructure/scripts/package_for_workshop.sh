@@ -56,12 +56,11 @@ package_lambda "glue_crawler_trigger" "$INFRA_DIR/custom-resource-lambdas/glue_c
 package_lambda "bedrock_kb_ingestion" "$INFRA_DIR/custom-resource-lambdas/bedrock_kb_ingestion"
 package_lambda "observability_setup" "$INFRA_DIR/custom-resource-lambdas/observability_setup"
 
-# AgentCore gateway (includes policy/interceptor scripts)
-AGENTCORE_DIR="$INFRA_DIR/custom-resource-lambdas/agentcore_gateway"
-cp "$PROJECT_ROOT/app/agentcore_strands/policy/deploy_policy.py" "$AGENTCORE_DIR/"
-cp "$PROJECT_ROOT/app/agentcore_strands/infra/deploy_interceptor.py" "$AGENTCORE_DIR/"
-package_lambda "agentcore_gateway" "$AGENTCORE_DIR" handler.py deploy_policy.py deploy_interceptor.py
-rm -f "$AGENTCORE_DIR/deploy_policy.py" "$AGENTCORE_DIR/deploy_interceptor.py"
+# NOTE: the old agentcore_gateway Lambda (which bundled the imperative
+# deploy_policy.py + deploy_interceptor.py) was retired — the Gateway, Policy
+# Engine, Cedar policies and interceptor are now native CloudFormation resources
+# in agentcore-topup-stack.yaml. The live interceptor zip is built from
+# interceptor_lambda.py below (InterceptorLambdaKey).
 
 # DataFoundation Lambda
 echo "  datafoundation"

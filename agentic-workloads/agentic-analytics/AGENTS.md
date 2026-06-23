@@ -59,23 +59,23 @@ The agent renders charts in an AgentCore **Code Interpreter** sandbox (matplotli
 
 ## Build & Deploy Commands
 
-```bash
-# Agent deployment (on EC2 Code Editor)
-cd app/agentcore_strands
-agentcore configure --entrypoint unicorn_rental_agent.py --name unicorn_rental_agent
-agentcore deploy
+The Gateway, toolset Lambdas, AgentCore Memory, observability, Cedar policy
+engine and Bedrock Guardrail are all **native CloudFormation resources** now —
+no `agentcore` CLI and no imperative `deploy_*.py` scripts in the runtime
+lifecycle.
 
-# Toolset deployment
-python3 infra/deploy_gateway.py          # MCP Gateway
-python3 infra/deploy_interceptor.py      # JWT propagation
-python3 infra/deploy_data_toolset.py     # 27 analytics tools
-python3 infra/deploy_api_toolset.py      # Booking tool
-python3 infra/deploy_sql_toolset.py      # Custom SQL tools
-python3 infra/deploy_memory.py           # AgentCore Memory
-python3 infra/deploy_observability.py    # CloudWatch logs/traces
-python3 policy/deploy_policy.py          # Cedar RBAC
-python3 policy/deploy_policy.py --enforce
-python3 guardrails/deploy_guardrail.py   # Bedrock Guardrail
+```bash
+# Demo mode — one command deploys the whole backend (nested CFN via main-stack.yaml)
+bash infrastructure/scripts/deploy_backend.sh
+# Fast agent-code iteration (re-zip + rebuild image + bump runtime, no full stack):
+bash infrastructure/scripts/deploy_backend.sh --agent-only
+
+# Workshop mode — participant edits ONE template then redeploys (on EC2 Code Editor)
+cd app/agentcore_strands          # holds the Makefile + agentcore-topup-stack.yaml
+make deploy                       # deploy/redeploy the AgentCore top-up stack
+make build                        # rebuild the agent image after a code edit
+make outputs                      # show GatewayUrl / AgentRuntimeArn
+# Each lab step = uncomment one fenced block (or flip one toggle) + `make deploy`.
 
 # UI (dev mode)
 cd app/ui && npm install && npm start    # Port 3001, PUBLIC_URL=/app
