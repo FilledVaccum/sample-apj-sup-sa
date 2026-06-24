@@ -140,7 +140,9 @@ def create_kb_role(kb_name, aurora_secret_arn, kb_docs_bucket=None):
         PolicyDocument=json.dumps(policy)
     )
     print(f"[OK] Updated IAM role policy with current secret ARN")
-    time.sleep(15)  # Wait for policy propagation
+    # Initial wait for policy propagation; create_knowledge_base also retries on the
+    # rds:DescribeDBClusters propagation race, so this is a best-effort head start.
+    time.sleep(20)
     return role_arn
 
 
@@ -189,7 +191,7 @@ def create_knowledge_base(kb_name, role_arn, aurora_cluster_arn, aurora_secret_a
     except Exception as e:
         print(f"Error checking KBs: {e}")
     
-    response = bedrock_agent.create_knowledge_base(
+    kb_kwargs = dict(
         name=kb_name,
         description='Agentic Analytics business context knowledge base',
         roleArn=role_arn,
@@ -215,7 +217,29 @@ def create_knowledge_base(kb_name, role_arn, aurora_cluster_arn, aurora_secret_a
             }
         }
     )
-    
+
+    # Bedrock validates the RDS storage config by assuming the KB role and calling
+    # rds:DescribeDBClusters. On a FRESH account the role + its inline policy were
+    # just created, so IAM may not have propagated yet — CreateKnowledgeBase then
+    # fails with a ValidationException wrapping a 403 "not authorized to perform:
+    # rds:DescribeDBClusters". The permission IS granted (see create_kb_role); it's
+    # purely an eventual-consistency race. Retry with backoff until IAM catches up.
+    response = None
+    for attempt in range(1, 13):  # up to ~12 tries / ~5 min
+        try:
+            response = bedrock_agent.create_knowledge_base(**kb_kwargs)
+            break
+        except bedrock_agent.exceptions.ValidationException as e:
+            msg = str(e)
+            transient = ('rds:DescribeDBClusters' in msg or 'not authorized' in msg
+                         or 'storage configuration provided is invalid' in msg)
+            if not transient:
+                raise
+            print(f"[retry {attempt}] KB role perms not propagated yet ({msg[:140]}); sleeping 25s")
+            time.sleep(25)
+    if response is None:
+        raise RuntimeError("create_knowledge_base failed after retries (KB role rds:DescribeDBClusters never propagated)")
+
     kb_id = response['knowledgeBase']['knowledgeBaseId']
     print(f"[OK] Created Knowledge Base: {kb_id}")
     
