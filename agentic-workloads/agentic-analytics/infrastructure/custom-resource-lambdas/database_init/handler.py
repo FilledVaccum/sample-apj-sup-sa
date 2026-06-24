@@ -139,10 +139,29 @@ def load_schema_from_s3(resource_arn, secret_arn, database, bucket, key):
 def load_csv_from_s3(resource_arn, secret_arn, database, bucket, key, table, columns=None):
     """Load CSV data from S3 into a table."""
     import csv
+    import re as _re_tbl
     from io import StringIO
-    
+
     print(f"  Loading {table} from s3://{bucket}/{key}...")
-    
+
+    # Idempotency: if the table is already populated, skip the load. On a stack
+    # UPDATE (vs first CREATE) the data already exists, so re-INSERTing every row
+    # just hits duplicate-key errors on every batch — harmless but very slow
+    # (the 30k-row availability table alone can exceed the Lambda's 15-min timeout
+    # and fail the deploy). A fast count guard keeps demo UPDATEs quick. (table is
+    # an internal, schema-controlled identifier; still validate it defensively.)
+    if _re_tbl.match(r'^[A-Za-z_][A-Za-z0-9_]*$', table):
+        try:
+            res = execute_sql(resource_arn, secret_arn, database,
+                              f"SELECT COUNT(*) AS n FROM {table}")  # nosec B608 - identifier validated above
+            existing = res.get("records", [{}])
+            n = existing[0][0].get("longValue", 0) if existing and existing[0] else 0
+            if n and int(n) > 0:
+                print(f"  Skipping {table} - already has {n} rows (idempotent re-run)")
+                return 0
+        except Exception as e:  # noqa: BLE001 - if the count fails, fall through and load
+            print(f"  (count check for {table} failed: {str(e)[:80]}; loading anyway)")
+
     try:
         response = s3_client.get_object(Bucket=bucket, Key=key)
         csv_content = response['Body'].read().decode('utf-8')
