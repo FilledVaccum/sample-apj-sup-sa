@@ -84,7 +84,7 @@ Workshop content is in the [`workshop/`](workshop/) directory. For hands-on inst
 Beyond text chat, the agent can **speak** and **draw**:
 
 - **Charts** — when a question calls for a visual, the agent renders a real chart in a sandboxed Code Interpreter, uploads the PNG to S3, and returns a short presigned `<chart>` tag the UI renders. Image bytes never cross the model stream. Works in both text and voice.
-- **Voice** — an optional second AgentCore Runtime hosts a [Pipecat](https://www.pipecat.ai/) pipeline (Deepgram STT/TTS) and connects to the browser over **WebRTC with Amazon Kinesis Video Streams (KVS) managed TURN** — no third-party media vendor. It invokes the *same* analytics agent over the same JWT, so RBAC/RLS and the conversation memory thread are shared across text and voice. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the voice deploy modes.
+- **Voice** — an optional second AgentCore Runtime hosts a [Pipecat](https://www.pipecat.ai/) pipeline (Deepgram STT/TTS). Two transports are supported: **`agentcore`** (WebRTC over **Amazon Kinesis Video Streams (KVS) managed TURN** — no third-party media vendor; both the runtime and the browser fetch the same TURN creds, the browser via the signaling proxy's JWT-gated `GET /api/ice`, so ICE can traverse NAT to the VPC runtime) and **`pipecat-cloud`** (Daily's hosted SFU). Either way it invokes the *same* analytics agent over the same JWT, so RBAC/RLS and the conversation memory thread are shared across text and voice. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the voice deploy modes.
 
 ### Workshop Deployment
 
@@ -94,13 +94,22 @@ The workshop uses CloudFormation to pre-provision base infrastructure (Aurora, G
 
 Demo mode deploys everything including AgentCore Gateway and Amplify UI. Uses the same packaging script as Workshop mode, only `DeployMode` differs.
 
+> **Artifacts bucket:** pick a globally-unique, account-scoped name (e.g.
+> `agentic-analytics-demo-<account-id>`) — a bare `agentic-analytics-demo` may
+> already be owned by another account and fail with `AccessDenied`.
+>
+> **npm registry:** the UI build (`package_and_upload.sh`) runs `npm install`. The
+> repo pins the public registry in `app/ui/.npmrc`, so no private/CodeArtifact
+> auth is needed — a developer's global `~/.npmrc` pointing at an authenticated
+> mirror won't break the build.
+
 ```bash
-# 1. Create S3 bucket for artifacts
-aws s3 mb s3://your-artifacts-bucket --region us-west-2
+# 1. Create S3 bucket for artifacts (account-scoped name)
+aws s3 mb s3://agentic-analytics-demo-<account-id> --region us-west-2
 
 # 2. Upload deployment artifacts (demo is the default mode — packages agent code, datafoundation Lambda, psycopg2 layer, amplify Lambda, and UI build in addition to workshop artifacts)
 cd infrastructure/scripts
-./package_and_upload.sh your-artifacts-bucket
+./package_and_upload.sh agentic-analytics-demo-<account-id>
 
 # 3. Deploy demo stack (use the command output from step 2, changing DeployMode to demo and stack name to agentic-analytics-demo)
 aws cloudformation create-stack \
@@ -123,6 +132,31 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --region us-west-2
 ```
+
+### Demo with voice
+
+Voice is off by default (Voice button hidden). To deploy with voice, add these to the
+create/update parameters and pick a mode:
+
+```
+ParameterKey=EnableVoice,ParameterValue=true
+ParameterKey=VoiceMode,ParameterValue=agentcore        # or pipecat-cloud
+ParameterKey=DeepgramApiKey,ParameterValue=<key>
+ParameterKey=DeepgramVoiceId,ParameterValue=aura-2-apollo-en
+```
+
+- **`agentcore`** — fully CFN: a second AgentCore Runtime (Pipecat) + WebRTC over
+  Amazon KVS managed TURN + a JWT signaling proxy. One deploy, no third-party SFU.
+- **`pipecat-cloud`** — deploy with `VoiceMode=pipecat-cloud`, then run the post-deploy
+  finisher (Pipecat Cloud is external SaaS that can't be pure CFN):
+  ```bash
+  PCC_PAT=… PCC_PUBLIC_KEY=… PCC_PRIVATE_KEY=… DEEPGRAM_API_KEY=… DAILY_API_KEY=… \
+    infrastructure/scripts/deploy_voice_pcc.sh
+  ```
+
+Both modes invoke the *same* analytics agent with the signed-in user's JWT, so RBAC/RLS
+and the shared memory thread are identical to text. See [`DEPLOYMENT.md`](DEPLOYMENT.md)
+for details (including the agentcore voice teardown caveat — VPC ENIs reclaim slowly).
 
 ## Project Structure
 

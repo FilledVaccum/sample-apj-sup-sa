@@ -78,23 +78,31 @@ is set only when voice is deployed (CFN injects it into `config.js`, or
 
 ## Operational notes
 
-- **CodeBuild builds all images in-cloud** (mirrors how Vincent's demo mode builds
-  the agent image). Custom-resource Lambdas trigger the builds and block dependent
-  resources until images are in ECR. ECR repos use `EmptyOnDelete: true` so
-  `delete-stack` is clean.
+- **CodeBuild builds all images in-cloud.** Custom-resource Lambdas trigger the
+  builds and block dependent resources until images are in ECR. ECR repos use
+  `EmptyOnDelete: true` so the image repos delete cleanly.
 - **agentcore voice runs as a second AgentCore Runtime in VPC mode**
   (`voice-agentcore-stack.yaml`), reusing the **Aurora VPC's private subnets + NAT**
   (VPC NetworkMode is required for UDP TURN; the runtime ENIs reach
   Deepgram/Bedrock/KVS/STS via the existing NAT — no new VPC or second NAT). WebRTC
   media relays through **Amazon Kinesis Video Streams (KVS) managed TURN** (a signaling
-  channel, ~$0.03/mo; TURN creds are fetched agent-side so the browser needs no AWS
-  creds). No Daily, no ALB, no VPC Link.
+  channel, ~$0.03/mo). The runtime fetches TURN creds for itself, and the browser
+  fetches the **same** creds from the signaling proxy's `GET /api/ice` (JWT-gated) so
+  it can gather relay candidates — without this the browser only has host candidates
+  and ICE can't traverse NAT to the VPC-only runtime. No Daily, no ALB, no VPC Link.
 - **Signaling proxy** (in the same stack): API Gateway HTTP API + Cognito JWT
   authorizer + a stdlib-only Lambda. It is authenticated at the edge (NOT a public
   Function URL): the browser POSTs its SDP offer (PATCHes ICE) with its Cognito Bearer
   token; the Lambda forwards that same Bearer to the JWT-only voice runtime
   `/invocations` and unwraps the SSE answer into the JSON the SmallWebRTC transport
-  expects. Media never flows through it — signaling only.
+  expects. It also serves `GET /api/ice` (the KVS TURN servers). Media never flows
+  through it — signaling only.
+- **Teardown of agentcore voice is NOT instant.** Deleting the voice Runtime leaves
+  AWS-managed VPC ENIs (`interfaceType: agentic_ai`) attached to the runtime security
+  group; AWS reclaims them asynchronously (~20–60 min), and the SG (hence a
+  `delete-stack` or a `VoiceMode` switch away from agentcore) blocks until then. This
+  is expected — CloudFormation retries and completes once the ENIs clear; you cannot
+  detach `ela-attach` ENIs manually.
 - **Cost:** agentcore voice is microVM-per-session (no always-on task/ALB); it
   cold-starts ~5-10s on the first connection. pipecat-cloud scales to zero
   (`min_agents=0`) but also cold-starts ~10s.
