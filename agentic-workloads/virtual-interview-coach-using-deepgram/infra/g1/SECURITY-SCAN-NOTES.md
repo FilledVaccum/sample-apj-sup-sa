@@ -8,8 +8,8 @@ Baseline from Holmes scan `c4b6b927` (2026-06-22): **191 findings, 93 HIGH**
 | Scanner | HIGH before | HIGH after | Disposition of the rest |
 |---|---|---|---|
 | Bandit | 0 | **0** | already clean |
-| cfn-guard (wa rule names) | 65 | 30 rule-failures | 35 cleared (fixed or KMS-suppressed); 30 are intentional-design / false-positive — see §C |
-| Checkov (Holmes HIGH IDs) | 24 | 6 cleared (1 fixed, 5 suppressed) | remainder intentional-design — see §C |
+| cfn-guard (wa rule names) | 65 | 32 rule-failures | 33 cleared (fixed or KMS-suppressed); 32 are intentional-design / false-positive — see §C |
+| Checkov (Holmes HIGH IDs) | 24 | 5 IDs cleared (1 fixed: CKV_AWS_161; 4 suppressed: CKV_AWS_136/149/27/373) | remainder intentional-design — see §C |
 | Semgrep raw-SQL | 2 | 2 (false positive) | §D — reported, not silenced |
 
 `cfn-lint` is **clean (0)** on all three templates after the edits — every change is
@@ -18,10 +18,11 @@ property that breaks deploy under modern S3 Object Ownership — see §C `S3_BUC
 
 **Remaining HIGHs are all justified for sample code** (the reviewer's accepted outcome):
 public WebRTC/ALB ingress (load-bearing), HTTP-only ALB behind CloudFront TLS, default
-CloudFront cert, S3 access-logging + Object Lock (need a dedicated log bucket / fight teardown),
-versioning-off on PII buckets (bounded-blast-radius delete), single-AZ + public RDS (POC),
-RDS storage-encryption (immutable — can't enable without replacing the live DB; set on a fresh
-deploy), disabled secret rotation (documented), and scoped inline IAM policies.
+CloudFront cert, S3 access-logging + Object Lock + versioning (need a dedicated log bucket /
+fight the `DeletionPolicy: Delete` teardown — versioning leaves delete markers so the bucket
+never empties), single-AZ + public RDS (POC), RDS storage-encryption (immutable — can't enable
+without replacing the live DB; set on a fresh deploy), disabled secret rotation (documented),
+and scoped inline IAM policies.
 
 Local toolchain used to reproduce + verify (no Holmes upload needed for the loop):
 
@@ -55,8 +56,7 @@ names Holmes reports), compiled to a single guard file.
 | CKV_AWS_161 | LatencyDB | `EnableIAMDatabaseAuthentication: true` (coexists with Secrets-Manager password auth) |
 | CKV_AWS_27 | ReportQueue | `SqsManagedSseEnabled: true` (SSE-SQS, AWS-managed, free) |
 | S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED | SpaBucket, SourceBucket | `BucketEncryption` SSE-S3 (AES256) |
-| S3_BUCKET_VERSIONING_ENABLED, CKV_AWS_21 | SpaBucket, SourceBucket | `VersioningConfiguration: Enabled` (+ noncurrent expiry) |
-| S3_BUCKET_SSL_REQUESTS_ONLY | SpaBucket, ResumeBucket, AudioBucket, SourceBucket | bucket policy deny when `aws:SecureTransport=false` |
+| S3_BUCKET_SSL_REQUESTS_ONLY | SpaBucket | bucket policy deny when `aws:SecureTransport=false` |
 
 ## B. KMS-CMK findings — SUPPRESSED with justification
 
@@ -81,7 +81,7 @@ names Holmes reports), compiled to a single guard file.
 | CLOUDFRONT_ACCESSLOGS_ENABLED, CKV_AWS_86 | Distribution | Access logging needs a dedicated log bucket; out of scope for a demo. |
 | S3_BUCKET_LOGGING_ENABLED, CKV_AWS_18 | all buckets | S3 access logging needs a dedicated log bucket (recursive); out of scope for a demo. |
 | S3_BUCKET_DEFAULT_LOCK_ENABLED | all buckets | Object Lock would block the `DeletionPolicy: Delete` teardown the demo relies on. |
-| S3_BUCKET_VERSIONING_ENABLED | ResumeBucket, AudioBucket | Versioning intentionally OFF on PII buckets — overwrite/delete must leave NO recoverable version (bounded-blast-radius delete, Constitution III). |
+| S3_BUCKET_VERSIONING_ENABLED, CKV_AWS_21 | all buckets | Versioning intentionally OFF everywhere. PII buckets (Resume/Audio): overwrite/delete must leave NO recoverable version (bounded-blast-radius delete, Constitution III). SPA/Source buckets: every stack uses `DeletionPolicy: Delete` and the build stack tears down automatically (`build-images.sh delete-stack`); versioning leaves delete markers + noncurrent versions so the bucket never empties and the stack delete fails. |
 | S3_BUCKET_NO_PUBLIC_RW_ACL | all buckets | False positive — every bucket sets `PublicAccessBlockConfiguration` (all four flags true), which blocks ALL public access. The rule only PASSes if a non-`PublicReadWrite` `AccessControl` is set, but `AccessControl` is a **legacy property** (cfn-lint W3045) that fails deploy on buckets with the modern default Object Ownership = BucketOwnerEnforced, so it is deliberately NOT set. |
 | RDS_STORAGE_ENCRYPTED, CKV_AWS_16 | LatencyDB | `StorageEncrypted` is IMMUTABLE — enabling it on the already-deployed instance forces a REPLACEMENT, and with `DeletionPolicy: Delete` that destroys the POC DB's data. Left off (a fresh deploy can set it before first create; documented inline). |
 | RDS_INSTANCE_PUBLIC_ACCESS_CHECK, CKV_AWS_17 | LatencyDB | POC: the laptop harness reaches the DB over its public endpoint; `HarnessIngressCidr` is documented "RESTRICT before real use". |
