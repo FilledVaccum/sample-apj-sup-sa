@@ -146,15 +146,44 @@ def create_kb_role(kb_name, aurora_secret_arn, kb_docs_bucket=None):
     return role_arn
 
 
+def _find_kb_by_name(name):
+    """Paginate all KBs and return the id of the one matching `name` (or None)."""
+    _next = None
+    while True:
+        kwargs = {'maxResults': 100}
+        if _next:
+            kwargs['nextToken'] = _next
+        resp = bedrock_agent.list_knowledge_bases(**kwargs)
+        for kb in resp.get('knowledgeBaseSummaries', []):
+            if kb['name'] == name:
+                return kb['knowledgeBaseId']
+        _next = resp.get('nextToken')
+        if not _next:
+            return None
+
+
 def create_knowledge_base(kb_name, role_arn, aurora_cluster_arn, aurora_secret_arn, database_name):
     """Create Bedrock Knowledge Base with Aurora pgvector."""
     print(f"Creating Knowledge Base: {kb_name}")
     
-    # Check if KB already exists (including alternate names)
+    # Check if KB already exists (including alternate names).
+    # IMPORTANT: paginate — list_knowledge_bases() returns only the first page
+    # (~10 KBs). In a shared/sandbox account with many KBs, a single page can miss
+    # our leftover KB, and we'd then try to create it again -> ConflictException.
     try:
-        response = bedrock_agent.list_knowledge_bases()
-        kb_map = {kb['name']: kb for kb in response.get('knowledgeBaseSummaries', [])}
-        
+        kb_map = {}
+        _next = None
+        while True:
+            kwargs = {'maxResults': 100}
+            if _next:
+                kwargs['nextToken'] = _next
+            response = bedrock_agent.list_knowledge_bases(**kwargs)
+            for kb in response.get('knowledgeBaseSummaries', []):
+                kb_map[kb['name']] = kb
+            _next = response.get('nextToken')
+            if not _next:
+                break
+
         # Check primary name first, then alternate
         for name in [kb_name, f"{kb_name}-v2"]:
             if name in kb_map:
@@ -229,6 +258,19 @@ def create_knowledge_base(kb_name, role_arn, aurora_cluster_arn, aurora_secret_a
         try:
             response = bedrock_agent.create_knowledge_base(**kb_kwargs)
             break
+        except bedrock_agent.exceptions.ConflictException:
+            # A KB with this name already exists (leftover from a prior rolled-back
+            # attempt that the paginated pre-check somehow still missed, or a
+            # concurrent create). Reuse it instead of failing the whole deploy.
+            print(f"[conflict] KB '{kb_kwargs['name']}' already exists — looking it up to reuse")
+            existing = _find_kb_by_name(kb_kwargs['name'])
+            if existing:
+                kb_id = existing
+                print(f"[OK] Reusing existing KB: {kb_id}")
+                wait_for_kb_active(kb_id)
+                return kb_id
+            print("[conflict] could not resolve existing KB id; retrying after 15s")
+            time.sleep(15)
         except bedrock_agent.exceptions.ValidationException as e:
             msg = str(e)
             transient = ('rds:DescribeDBClusters' in msg or 'not authorized' in msg
@@ -238,7 +280,7 @@ def create_knowledge_base(kb_name, role_arn, aurora_cluster_arn, aurora_secret_a
             print(f"[retry {attempt}] KB role perms not propagated yet ({msg[:140]}); sleeping 25s")
             time.sleep(25)
     if response is None:
-        raise RuntimeError("create_knowledge_base failed after retries (KB role rds:DescribeDBClusters never propagated)")
+        raise RuntimeError("create_knowledge_base failed after retries (propagation race or unresolved name conflict)")
 
     kb_id = response['knowledgeBase']['knowledgeBaseId']
     print(f"[OK] Created Knowledge Base: {kb_id}")
