@@ -559,16 +559,28 @@ Resources:
           systemctl enable code-editor
           systemctl start code-editor
 
-          # Install VS Code extensions
+          # Install VS Code extensions (Python only — Amazon Q is intentionally NOT
+          # installed; this workshop uses Claude Code on Amazon Bedrock instead).
           sleep 10
           sudo -u "$CODE_EDITOR_USER" "$CODE_EDITOR_CMD" --install-extension ms-python.python --force || true
-          sudo -u "$CODE_EDITOR_USER" "$CODE_EDITOR_CMD" --install-extension amazonwebservices.aws-toolkit-vscode --force || true
-          sudo -u "$CODE_EDITOR_USER" "$CODE_EDITOR_CMD" --install-extension amazonwebservices.amazon-q-vscode --force || true
 
-          # Install Kiro CLI
-          sudo -u "$CODE_EDITOR_USER" curl -fsSL https://cli.kiro.dev/install -o /tmp/kiro_cli_install.sh
-          sudo -u "$CODE_EDITOR_USER" bash /tmp/kiro_cli_install.sh 2>&1 || true
-          sudo -i -u "$CODE_EDITOR_USER" kiro-cli --version || true
+          # --- Claude Code CLI on Amazon Bedrock -------------------------------
+          # Install the CLI globally (nodejs is installed above) and configure it to
+          # use Bedrock via the EC2 instance role (no API key). The instance role
+          # already grants bedrock:* + aws-marketplace:Subscribe/ViewSubscriptions.
+          # Model is pinned to the cross-region Sonnet 4.6 inference profile — the
+          # model reliably invocable in fresh Bedrock accounts (Opus 4.7/4.8 are
+          # gated behind account containment score; opus-4-6 needs a per-account
+          # Marketplace subscription that may not exist). Claude Code uses the
+          # default AWS SDK credential chain, so the instance role is picked up
+          # automatically.
+          npm install -g @anthropic-ai/claude-code 2>&1 || echo "claude-code install failed (non-fatal)"
+          cat >> "/home/$CODE_EDITOR_USER/.bashrc" << CLAUDEEOF
+          # Claude Code -> Amazon Bedrock (instance-role auth, no API key)
+          export CLAUDE_CODE_USE_BEDROCK=1
+          export ANTHROPIC_MODEL='us.anthropic.claude-sonnet-4-6'
+          export ANTHROPIC_DEFAULT_SONNET_MODEL='us.anthropic.claude-sonnet-4-6'
+          CLAUDEEOF
 
           # Python venv setup
           sudo -u "$CODE_EDITOR_USER" python3.11 -m pip install --user --upgrade pip
