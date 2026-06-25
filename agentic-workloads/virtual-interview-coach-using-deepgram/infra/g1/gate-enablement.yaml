@@ -42,18 +42,26 @@ Parameters:
     Type: AWS::EC2::VPC::Id
     Description: VPC for the RDS instance (the default VPC is fine for a POC).
 
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: >-
-      At least two subnets in different AZs for the DB subnet group. Use public subnets so the
-      local harness (on your laptop) can reach the DB; the default VPC's subnets are public.
-
-  HarnessIngressCidr:
+  VpcCidr:
     Type: String
-    Default: 0.0.0.0/0
+    Default: 172.31.0.0/16
     Description: >-
-      CIDR allowed to reach Postgres (5432). DEFAULT IS OPEN for POC convenience — RESTRICT
-      this to your own IP (e.g. 203.0.113.4/32) before deploying anything real.
+      CIDR of the VPC above. Used (a) to scope the DB security group to in-VPC sources only and
+      (b) as a sanity bound for the private subnet CIDRs. The default 172.31.0.0/16 is the
+      default-VPC range; pass your VPC's CIDR if different.
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 172.31.240.0/24
+    Description: >-
+      CIDR for the first PRIVATE DB subnet this stack creates inside the VPC. Must not overlap any
+      existing subnet (the default VPC uses low /20 ranges, so the high 172.31.240.0/24 is safe).
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 172.31.241.0/24
+    Description: >-
+      CIDR for the second PRIVATE DB subnet (a different AZ). Must not overlap any existing subnet.
 
   DBEngineVersion:
     Type: String
@@ -148,12 +156,71 @@ Resources:
       Tags:
         project: !Ref ProjectTag
 
+  # --- Private DB networking (RDS is NOT internet-reachable) -----------------------------
+  # The default VPC ships only PUBLIC subnets (each has a route to the IGW). Rather than place
+  # the DB there, this stack creates two PRIVATE subnets (no IGW route) in the same VPC and a
+  # private route table with NO 0.0.0.0/0 route. RDS needs no internet egress, so no NAT gateway
+  # is required — in-VPC clients (the Fargate tasks, via the deploy-stack SG-to-SG rule) reach it
+  # over private addressing only. This replaces the prior public-subnet + PubliclyAccessible
+  # design that exposed Postgres to the internet (AWS best-practice: DBs belong in private subnets).
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-private-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-private-2
+
+  # Private route table with only the implicit local route — NO IGW / NO NAT default route, so
+  # nothing in these subnets can reach (or be reached from) the internet.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-private-rt
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
   # --- RDS Postgres (3-table latency slice) ---------------------------------------------
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupDescription: !Sub ${AWS::StackName} G1 latency DB
-      SubnetIds: !Ref SubnetIds
+      DBSubnetGroupDescription: !Sub ${AWS::StackName} G1 latency DB (private subnets)
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
       Tags:
         - Key: project
           Value: !Ref ProjectTag
@@ -161,14 +228,17 @@ Resources:
   DBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub ${AWS::StackName} Postgres access for the measurement harness
+      GroupDescription: !Sub ${AWS::StackName} Postgres access (in-VPC only; no public ingress)
       VpcId: !Ref VpcId
       SecurityGroupIngress:
+        # In-VPC sources only. The deploy stack adds an SG-to-SG rule for the Fargate task SG via a
+        # standalone AWS::EC2::SecurityGroupIngress; this CIDR rule covers any in-VPC client (e.g. a
+        # bastion or an in-VPC migration task). The DB has no public IP, so this is never internet-open.
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
-          CidrIp: !Ref HarnessIngressCidr
-          Description: Postgres from the harness (RESTRICT this CIDR)
+          CidrIp: !Ref VpcCidr
+          Description: Postgres from in-VPC sources only
       Tags:
         - Key: project
           Value: !Ref ProjectTag
@@ -206,9 +276,14 @@ Resources:
       StorageEncrypted: true
       AutoMinorVersionUpgrade: true          # RDS_AUTOMATIC_MINOR_VERSION_UPGRADE_ENABLED (in-place, no replace)
       EnableIAMDatabaseAuthentication: true  # CKV_AWS_161 (in-place; coexists with the Secrets-Manager password)
-      # PubliclyAccessible + single-AZ are intentional for this POC (the laptop harness reaches the DB
-      # over its public endpoint; demo scale). Reported, not suppressed — see SECURITY-SCAN-NOTES.md.
-      PubliclyAccessible: true
+      # Private DB: no public IP, reachable only from inside the VPC (the Fargate tasks via the
+      # deploy-stack SG-to-SG rule). The laptop harness no longer connects over a public endpoint —
+      # run schema migrations as an in-VPC ECS one-off task (see CLAUDE.md / README.md) or via a
+      # bastion / SSM port-forward. NOTE: PubliclyAccessible + the DB subnet group are IMMUTABLE, so
+      # applying this onto a previously-PUBLIC live instance REPLACES it (data is reset). That is an
+      # ACCEPTED outcome for this demo — DeletionPolicy: Delete and no backups by design; re-run the
+      # in-VPC migration after the new instance comes up. Single-AZ is a demo/cost trade-off.
+      PubliclyAccessible: false
       MultiAZ: false
       BackupRetentionPeriod: 0
       DBSubnetGroupName: !Ref DBSubnetGroup

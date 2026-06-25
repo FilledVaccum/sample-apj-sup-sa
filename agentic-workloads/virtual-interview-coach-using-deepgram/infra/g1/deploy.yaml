@@ -151,6 +151,22 @@ Parameters:
     Default: 1
     Description: Report-worker tasks (F003 async scoring; demo scale = 1, scaled independently).
 
+  CloudFrontPrefixListId:
+    Type: String
+    Default: ""
+    Description: >-
+      OPTIONAL hardening: the id of the AWS-managed CloudFront origin-facing prefix list
+      (com.amazonaws.global.cloudfront.origin-facing, e.g. pl-xxxxxxxx — region-specific, look it
+      up with `aws ec2 describe-managed-prefix-lists`). When set, the ALB only accepts HTTP from
+      CloudFront edge IPs, so the demo origin cannot be reached directly by bypassing CloudFront.
+      Leave EMPTY (default) to keep the demo-friendly open-to-internet ALB (current behavior).
+
+# =========================================================================================
+Conditions:
+  # True when CloudFrontPrefixListId is provided — switches the ALB ingress from 0.0.0.0/0 to the
+  # CloudFront origin-facing managed prefix list.
+  RestrictAlbToCloudFront: !Not [!Equals [!Ref CloudFrontPrefixListId, ""]]
+
 # =========================================================================================
 Resources:
 
@@ -212,6 +228,28 @@ Resources:
           Value: !Ref ProjectTag
 
   # --- F003 async report job queue -------------------------------------------------------
+  # Dead-letter queue: a scoring message that fails repeatedly (poison job — bad payload, a
+  # persistent Bedrock error) is moved here after maxReceiveCount attempts instead of
+  # redelivering until MessageRetentionPeriod expires (which would block the queue and waste
+  # Bedrock spend). Inspect it to debug failed jobs; it shares the source queue's retention.
+  ReportDLQ:
+    Type: AWS::SQS::Queue
+    Metadata:
+      guard:
+        SuppressedRules:
+          - SQS_QUEUE_KMS_MASTER_KEY_ID_RULE
+      checkov:
+        skip:
+          - id: CKV_AWS_27
+            comment: SSE-SQS (SqsManagedSseEnabled) encrypts at rest; CMK not needed for a sample.
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-report-jobs-dlq
+      MessageRetentionPeriod: 1209600  # 14 days — keep failed jobs long enough to investigate
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: project
+          Value: !Ref ProjectTag
+
   ReportQueue:
     Type: AWS::SQS::Queue
     # SQS_QUEUE_KMS_MASTER_KEY_ID_RULE suppressed: this queue uses SSE-SQS (AWS-managed key,
@@ -232,22 +270,36 @@ Resources:
       VisibilityTimeout: 360        # > the worker's per-job scoring time; redrive if it crashes
       MessageRetentionPeriod: 86400 # 1 day
       SqsManagedSseEnabled: true    # SSE-SQS at-rest encryption (AWS-managed key, free) — CKV_AWS_27
+      # After 5 failed receives a poison job is moved to the DLQ instead of looping forever.
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReportDLQ.Arn
+        maxReceiveCount: 5
       Tags:
         - Key: project
           Value: !Ref ProjectTag
 
   # --- Security groups -------------------------------------------------------------------
+  # ALB ingress: when CloudFrontPrefixListId is supplied, lock :80 to the CloudFront origin-facing
+  # managed prefix list (CloudFront edge IPs only — origin cannot be reached by bypassing the
+  # distribution). Otherwise keep the demo default of open-to-internet :80. The two ingress shapes
+  # are mutually exclusive via the RestrictAlbToCloudFront condition.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub ${AWS::StackName} ALB ingress (HTTP from CloudFront/Internet)
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: HTTP (CloudFront origin fetch / demo direct access)
+      SecurityGroupIngress: !If
+        - RestrictAlbToCloudFront
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            SourcePrefixListId: !Ref CloudFrontPrefixListId
+            Description: HTTP from CloudFront origin-facing edge IPs only
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+            Description: HTTP (CloudFront origin fetch / demo direct access)
       Tags:
         - Key: project
           Value: !Ref ProjectTag
