@@ -151,6 +151,16 @@ Parameters:
     Default: 1
     Description: Report-worker tasks (F003 async scoring; demo scale = 1, scaled independently).
 
+  GenerativeMode:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+    Description: >-
+      F009 (Constitution VII). "0" (default) = the vetted bank is preferred; the backend only
+      generates questions in the prep window when the bank has none at the chosen difficulty.
+      "1" = force generative mode (generate the full plan even when a bank exists) for testing/demo.
+      Generation is always prep-window only (never on the response_gap clock).
+
   CloudFrontPrefixListId:
     Type: String
     Default: ""
@@ -853,6 +863,9 @@ Resources:
               Value: bedrock_direct
             - Name: AWS_REGION
               Value: !Ref AWS::Region
+            # F009 (Constitution VII): force/allow prep-window question generation. Off the gap clock.
+            - Name: GENERATIVE_MODE
+              Value: !Ref GenerativeMode
             # F002 (G2): resume structured-extraction (T011) invokes this model OFF the gap clock.
             # Must be the inference-profile id (us.*) so on-demand invoke works in this region;
             # without it the backend falls back to a bare model id Bedrock rejects (ValidationException).

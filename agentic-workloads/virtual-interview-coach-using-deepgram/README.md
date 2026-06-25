@@ -150,6 +150,19 @@ aws ecs run-task --cluster interviewcoach-g1-demo \
   --region $AWS_REGION
 ```
 
+### Step 3b — (optional) load the vetted question bank
+
+The interview **works without this step**: when the question bank has no approved questions at the
+chosen difficulty, the backend generates a complete, resume- and JD-grounded question plan in the
+prep window (Generative Mode — Constitution Principle VII; runs off the live latency path). Loading
+the bank simply makes the *default* questions human-vetted and higher quality where a role is covered.
+
+To load the vetted fixture bank into the private RDS, run `bank/load_fixture.py` as a one-off in-VPC
+task (the backend task role already has the Bedrock-Titan + DB-secret permissions it needs). To
+instead **force** generative mode even when a bank is present (testing/demo), set the
+`GenerativeMode=1` stack parameter (env `GENERATIVE_MODE=1` for `deploy.sh`) and redeploy — every
+session then generates its plan and is honestly flagged as not-fully-bank-vetted.
+
 ### Step 4 — seed a user and open the portal
 
 ```bash

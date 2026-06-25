@@ -110,6 +110,7 @@ deploy_stack() {
       WorkerImageTag="$IMAGE_TAG" \
       BackendImageTag="$IMAGE_TAG" \
       ReportImageTag="$IMAGE_TAG" \
+      GenerativeMode="${GENERATIVE_MODE:-0}" \
       DesiredWorkerCount="$desired" \
       DesiredBackendCount="$desired" \
       DesiredReportWorkerCount="$desired"
