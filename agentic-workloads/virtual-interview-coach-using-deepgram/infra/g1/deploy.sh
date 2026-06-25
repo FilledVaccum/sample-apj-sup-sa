@@ -37,6 +37,23 @@ acct() { aws sts get-caller-identity --query Account --output text --region "$RE
 ACCOUNT_ID="$(acct)"
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
+# deploy.yaml is > 51,200 bytes, so `cloudformation deploy` must stage it through S3. Use a
+# small, reusable per-account/region artifacts bucket (created once; idempotent).
+CFN_ARTIFACTS_BUCKET="interviewcoach-g1-cfn-artifacts-${ACCOUNT_ID}-${REGION}"
+ensure_artifacts_bucket() {
+  if ! aws s3api head-bucket --bucket "$CFN_ARTIFACTS_BUCKET" --region "$REGION" >/dev/null 2>&1; then
+    log "Creating CFN template-staging bucket $CFN_ARTIFACTS_BUCKET"
+    if [[ "$REGION" == "us-east-1" ]]; then
+      aws s3api create-bucket --bucket "$CFN_ARTIFACTS_BUCKET" --region "$REGION" >/dev/null
+    else
+      aws s3api create-bucket --bucket "$CFN_ARTIFACTS_BUCKET" --region "$REGION" \
+        --create-bucket-configuration "LocationConstraint=$REGION" >/dev/null
+    fi
+    aws s3api put-public-access-block --bucket "$CFN_ARTIFACTS_BUCKET" --region "$REGION" \
+      --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
+  fi
+}
+
 gate_out() {
   aws cloudformation describe-stacks --stack-name "$GATE_STACK" --region "$REGION" \
     --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
@@ -72,11 +89,14 @@ echo "VPC=$VPC_ID  Subnets=$SUBNET_IDS  RdsSG=$RDS_SG_ID"
 # once the images are pushed, so CloudFormation waits on a service that can actually start.
 deploy_stack() {
   local desired="${1:-1}"
+  ensure_artifacts_bucket
   log "Deploying $DEMO_STACK (image tag: $IMAGE_TAG, desired count: $desired)"
   aws cloudformation deploy \
     --region "$REGION" \
     --stack-name "$DEMO_STACK" \
     --template-file infra/g1/deploy.yaml \
+    --s3-bucket "$CFN_ARTIFACTS_BUCKET" \
+    --s3-prefix deploy-yaml \
     --capabilities CAPABILITY_IAM \
     --no-fail-on-empty-changeset \
     --parameter-overrides \
