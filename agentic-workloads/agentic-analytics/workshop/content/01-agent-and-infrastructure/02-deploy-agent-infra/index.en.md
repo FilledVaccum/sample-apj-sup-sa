@@ -160,13 +160,13 @@ AgentRuntimeArn     arn:aws:bedrock-agentcore:us-east-1:xxxxxxxxxxxx:runtime/age
 
 ### Step 2.6: Redeploying after a code change — `make build`
 
-`make deploy` deploys **infrastructure** changes (uncommenting a section, flipping a value). It does **not** rebuild the agent image — the Runtime always points at the `:latest` image tag, so a Python change in `unicorn_rental_agent.py` needs an explicit rebuild:
+`make deploy` deploys **infrastructure** changes (uncommenting a section, flipping a value). On its own it does **not** rebuild the agent image, so a Python change in `unicorn_rental_agent.py` (or an SOP edit) needs an explicit rebuild:
 
 ```bash
 make build
 ```
 
-`make build` re-zips the agent code, triggers the same CodeBuild project to rebuild and push `:latest`, then rolls the Runtime to a new version (re-pulling the image). Use `make deploy` when you change the **template**; use `make build` when you change the **agent code**.
+`make build` runs a small, readable bash script (`scripts/rebuild-agent.sh` — open it, there's no hidden magic): it re-zips the agent code, uploads it, and runs `make deploy` with a **fresh image tag**. CloudFormation does the rest — it rebuilds the image under that tag and rolls the Runtime to a new version, re-applying the auth, network, and environment settings straight from the template. Use `make deploy` when you change the **template**; use `make build` when you change the **agent code**.
 
 ::alert[**You won't fully test the agent here.** The Runtime is JWT-only — it's invoked by the chat UI with the signed-in user's token, not from the command line. You'll connect that UI in Step 3 and watch the agent (and its memory) work end to end.]{type="info"}
 
