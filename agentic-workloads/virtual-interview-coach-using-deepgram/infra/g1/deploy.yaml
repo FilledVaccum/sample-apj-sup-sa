@@ -601,7 +601,7 @@ Resources:
     # SECRETSMANAGER_USING_CMK / CKV_AWS_149 suppressed: Secrets Manager encrypts with the
     # AWS-managed aws/secretsmanager key by default. A dedicated CMK is unnecessary for a
     # sample's shared HS256 signing secret. Rotation (SECRETSMANAGER_ROTATION_ENABLED_CHECK)
-    # is intentionally not configured — see SECURITY-SCAN-NOTES.md (reported, not suppressed).
+    # is intentionally not configured for this demo.
     Metadata:
       guard:
         SuppressedRules:
@@ -1131,7 +1131,7 @@ Resources:
     # S3_BUCKET_DEFAULT_LOCK_ENABLED and S3_BUCKET_VERSIONING_ENABLED are intentionally NOT met
     # (access logging needs a dedicated log bucket; Object Lock + versioning both fight the demo's
     # DeletionPolicy: Delete teardown — versioning leaves delete markers + noncurrent versions so the
-    # bucket never empties and the stack delete fails) and are reported in SECURITY-SCAN-NOTES.md.
+    # bucket never empties and the stack delete fails).
     Metadata:
       guard:
         SuppressedRules:

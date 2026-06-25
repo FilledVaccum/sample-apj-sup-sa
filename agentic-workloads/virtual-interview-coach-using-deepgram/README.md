@@ -176,6 +176,24 @@ aws cloudformation delete-stack --stack-name interviewcoach-g1      --region $AW
 `DeletionPolicy: Delete` on the DB, buckets, and CMKs means no PII (resume, audio, transcript,
 scores) is retained after teardown — the bounded-blast-radius end state (FR-219).
 
+### Security posture (what the stacks provision)
+
+- **RDS is private.** The Postgres instance is created with `PubliclyAccessible: false` (no
+  public IP) in two stack-created **private subnets** whose route table has only the VPC-`local`
+  route — no Internet Gateway, no NAT — so it is unreachable from the internet. Its security group
+  accepts port 5432 **only** from in-VPC sources (the VPC CIDR + the Fargate task security group).
+  Schema migrations therefore run as an in-VPC ECS one-off task (Step 3), not from your laptop.
+- **The DB password is randomly generated, never in the template.** `ManageMasterUserPassword:
+  true` has RDS generate the master password and store it in a Secrets Manager `rds!db-*` secret;
+  the services read it per-connection via `DB_SECRET_ARN` (rotation-proof). Storage is encrypted
+  (`StorageEncrypted: true`) and IAM database authentication is enabled.
+- **PII homes are encrypted and consent-gated.** Raw resumes and recorded audio live in dedicated
+  SSE-KMS S3 buckets (customer-managed keys, public access fully blocked, 30-day expiry); RDS +
+  those buckets are the only PII homes. Recording is opt-in at the consent step.
+- **Edge / auth.** Users reach only CloudFront (HTTPS); the ALB carries just `/api/*` and `/offer`
+  and can optionally be locked to the CloudFront origin-facing prefix list (`CloudFrontPrefixListId`).
+  The Cognito pool is admin-create-only (no open sign-up) — seed users with `seed-user.sh`.
+
 ## Development
 
 Each Python service has its own venv (`backend/.venv`, `report-worker/.venv`,

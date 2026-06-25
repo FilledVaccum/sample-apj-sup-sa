@@ -271,8 +271,7 @@ Resources:
       # (set before the first create). Applying it to an ALREADY-DEPLOYED unencrypted LatencyDB forces
       # a REPLACEMENT, and with DeletionPolicy: Delete that DESTROYS the POC DB's data (sessions,
       # question bank, guidance). Do NOT `cloudformation deploy` this change onto an existing stack
-      # without a data-preserving migration (snapshot -> encrypted-copy -> restore). See
-      # SECURITY-SCAN-NOTES.md.
+      # without a data-preserving migration (snapshot -> encrypted-copy -> restore).
       StorageEncrypted: true
       AutoMinorVersionUpgrade: true          # RDS_AUTOMATIC_MINOR_VERSION_UPGRADE_ENABLED (in-place, no replace)
       EnableIAMDatabaseAuthentication: true  # CKV_AWS_161 (in-place; coexists with the Secrets-Manager password)
@@ -298,8 +297,7 @@ Resources:
     Type: AWS::SecretsManager::Secret
     # SECRETSMANAGER_USING_CMK / CKV_AWS_149 suppressed: Secrets Manager encrypts with the
     # AWS-managed aws/secretsmanager key by default; a dedicated CMK is unnecessary for a sample.
-    # Rotation is intentionally not configured (the harness sets the key once) — reported in
-    # SECURITY-SCAN-NOTES.md, not suppressed.
+    # Rotation is intentionally not configured (the harness sets the key once).
     Metadata:
       guard:
         SuppressedRules:
