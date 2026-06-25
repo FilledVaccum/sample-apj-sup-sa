@@ -224,14 +224,26 @@ async def assemble_blueprint(
     job_description: str,
     difficulty: str,
     num_questions: int = _PLAN_SIZE,
+    *,
+    resume_summary: str = "",
+    generative_mode: bool | None = None,
 ) -> dict:
     """Assemble + persist the JD-ranked plan for this session. Pure DB selection (zero LLM on the
-    selection path); the only model touch is the one-time JD embedding above. Returns the contract
+    selection path); the only model touch is the one-time JD embedding above (and, in Generative
+    Mode, prep-window question generation — also off the response_gap clock). Returns the contract
     output (blueprint_id, target_competencies, ordered_archetype_ids, opening_archetype_id,
     domain_coverage_reduced).
 
     `num_questions` (from the chosen interview duration) sizes the plan; the rows are composed across
-    the general/technical/job-scope mix (item 1) by _compose_plan."""
+    the general/technical/job-scope mix (item 1) by _compose_plan.
+
+    Generative Mode (Constitution VII): when the vetted bank has no approved GENERAL rows at this
+    difficulty (empty/unseeded bank) OR `generative_mode` is forced, generate the general/behavioral
+    questions with Bedrock during prep instead of failing. Domain generation already happens for
+    uncovered roles. Generated rows are marked source='generated' and the session is flagged
+    domain_coverage_reduced so reporting never implies human-vetted provenance."""
+    if generative_mode is None:
+        generative_mode = settings.generative_mode
     jd_embedding = _embed_jd(job_title, job_description)
     role_family = classify_role_family(job_title, job_description)
 
@@ -245,36 +257,60 @@ async def assemble_blueprint(
 
     # Retrieve a pool at least as large as the interview so the mix has rows to compose from; cap so
     # prep stays fast. The query is JD-ranked (closest first), which is what makes job-scope selection
-    # (closest domain rows) free.
+    # (closest domain rows) free. When generative_mode is forced we skip the bank entirely so the plan
+    # is fully generated (operator override — Constitution VII d / US3).
     pool_size = max(_PLAN_SIZE, num_questions * 2)
-    ranked = await retrieval.retrieve_ranked(
-        jd_embedding,
-        difficulty,
-        role_family=role_family,
-        include_domain=include_domain,
-        limit=pool_size,
+    ranked = (
+        []
+        if generative_mode
+        else await retrieval.retrieve_ranked(
+            jd_embedding,
+            difficulty,
+            role_family=role_family,
+            include_domain=include_domain,
+            limit=pool_size,
+        )
     )
+    have_general = any(r.get("category") == "general" for r in ranked)
+    # Tracks whether ANY composed question was generated (vs human-vetted bank). If so the session is
+    # flagged domain_coverage_reduced so reporting never implies human-vetted provenance (Const. VII c).
+    used_generated = False
+
+    # Generative Mode (Constitution VII): if the bank has no GENERAL rows at this difficulty (empty
+    # bank), or generation is forced, generate behavioral/general questions in the prep window and
+    # compose them directly. This is what lets a bank-LESS deploy still run a complete interview.
+    # Off the response_gap clock; generated rows are marked + the session flagged (VII a/b/c).
+    if not have_general or generative_mode:
+        gen_general = await jit_generate.generate_general_questions(
+            resume_summary, job_title, job_description, difficulty, n=max(2, num_questions // 2)
+        )
+        if gen_general:
+            ranked = ranked + gen_general
+            used_generated = True
 
     # On-the-fly domain generation: when the vetted bank has NO approved domain questions for this role
-    # at this difficulty, generate JD-specific ones at prep and compose them directly into the plan
-    # (off the response_gap clock). This deliberately serves un-human-reviewed questions for uncovered
-    # roles only — see jit_generate.py's constitution note. Composed in directly (not via the approved
-    # query) so a truly novel role (role_family=None) works too. If generation yields nothing, the
-    # General-only fallback stands.
-    jit_rows: list[dict] = []
-    if domain_coverage_reduced:
-        n_domain = max(2, num_questions // 2)
+    # at this difficulty (or generation is forced), generate JD-specific ones at prep and compose them
+    # directly into the plan (off the response_gap clock). Deliberately serves un-human-reviewed
+    # questions for uncovered roles / bank-less deploys — see jit_generate.py's constitution note.
+    if domain_coverage_reduced or generative_mode:
         jit_rows = await jit_generate.generate_domain_questions(
-            job_title, job_description, difficulty, role_family, n=n_domain
+            job_title, job_description, difficulty, role_family, n=max(2, num_questions // 2)
         )
         if jit_rows:
             ranked = ranked + jit_rows
-            domain_coverage_reduced = False  # we now have JD-specific domain coverage
+            used_generated = True
+
+    # Any generated row means the plan is not fully human-vetted -> honest coverage flag (Const. V/VII c).
+    if used_generated:
+        domain_coverage_reduced = True
 
     if not ranked:
-        # No approved+embedded rows at this difficulty at all — surface it; setup created the session
-        # but the bank cannot serve it. (Operator must load/approve archetypes for this difficulty.)
-        raise RuntimeError(f"no approved archetypes available for difficulty={difficulty!r}")
+        # Neither the bank nor generation could produce any questions — surface it honestly. Setup
+        # created the session but it cannot be served; the caller rolls it back and returns 503.
+        raise RuntimeError(
+            f"could not prepare an interview for difficulty={difficulty!r}: "
+            "no approved bank questions and question generation produced nothing"
+        )
 
     plan = _compose_plan(ranked, num_questions)
 
@@ -285,7 +321,17 @@ async def assemble_blueprint(
     blueprint_id = await db.create_blueprint(session_id, competencies, ordered_ids, opening_id)
     await db.set_session_plan(session_id, ordered_ids, blueprint_id, domain_coverage_reduced)
 
-    if domain_coverage_reduced:
+    if used_generated:
+        # Audit the Constitution VII relaxation per session: which mode, and what we served.
+        log.info(
+            "session-prep: served GENERATED questions (Constitution VII relaxation) — "
+            "reason=%s, role_family=%s, difficulty=%s, session=%s",
+            "operator-forced" if generative_mode else "empty-bank-fallback",
+            role_family,
+            difficulty,
+            session_id,
+        )
+    elif domain_coverage_reduced:
         log.info(
             "session-prep: niche-role fallback fired (role_family=%s, difficulty=%s) -> General-only plan",
             role_family,

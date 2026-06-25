@@ -36,6 +36,31 @@ _DEFAULT_DURATION_MIN = 10
 _DEFAULT_QUESTIONS = _DURATION_TO_QUESTIONS[_DEFAULT_DURATION_MIN]
 
 
+def _resume_summary(facts: dict | None) -> str:
+    """Compact one-paragraph resume summary for grounding generated questions (Generative Mode).
+
+    Built from the confirmed resume facts (name/summary/skills/recent experience). Kept short — it is
+    only context for prep-window generation, not the live path."""
+    if not facts:
+        return ""
+    parts: list[str] = []
+    if facts.get("summary"):
+        parts.append(str(facts["summary"]))
+    skills = facts.get("skills") or []
+    if skills:
+        parts.append("Skills: " + ", ".join(str(s) for s in skills[:20]))
+    for exp in (facts.get("experience") or [])[:3]:
+        title = exp.get("title") or ""
+        org = exp.get("organization") or ""
+        hi = "; ".join(str(h) for h in (exp.get("highlights") or [])[:2])
+        line = f"{title} at {org}".strip(" at ")
+        if hi:
+            line += f" — {hi}"
+        if line:
+            parts.append(line)
+    return "\n".join(parts)[:4000]
+
+
 def _effective_duration(duration_minutes: int | None) -> int:
     """Resolve the requested duration to a supported tier (nearest), or the default when absent. This
     is the length recorded on the session and used by the worker to bound the live interview."""
@@ -133,10 +158,12 @@ async def create_session(
         plan = await prep_blueprint.assemble_blueprint(
             session_id, req.job_title or "", req.job_description, difficulty,
             num_questions=num_questions,
+            resume_summary=_resume_summary(user.get("resume_parsed_facts")),
         )
     except RuntimeError as exc:
-        # The bank cannot serve this difficulty (no approved archetypes). Roll back the empty session
-        # so it cannot be started without a plan, and surface a 503.
+        # Neither the vetted bank NOR prep-window generation (Generative Mode, Constitution VII) could
+        # produce a plan for this difficulty. Roll back the empty session so it cannot be started
+        # without a plan, and surface a 503 honestly.
         await db.delete_session_cascade(session_id, user_sub)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

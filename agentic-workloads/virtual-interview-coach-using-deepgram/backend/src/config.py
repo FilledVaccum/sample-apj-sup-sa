@@ -19,6 +19,13 @@ def _get_int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _get_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _database_url() -> str | None:
     """Resolve DATABASE_URL, or assemble it from DB_* parts.
 
@@ -98,6 +105,12 @@ class Settings:
     audio_kms_key_id: str | None
     # TTL (seconds) for a minted playback pre-signed GET URL (FR-008); short by design (minutes).
     audio_url_ttl_s: int
+    # --- F009 (Generative Mode, Constitution VII) ---
+    # When True, session-prep generates the FULL question plan (general + domain) with Bedrock even
+    # when an approved bank could serve it (operator force, for testing/demo). When False (default),
+    # generation only fires as the fallback for an empty bank at the chosen difficulty. Either way,
+    # generation runs ONLY in the prep window (never on the response_gap clock — Principle I).
+    generative_mode: bool
 
     @staticmethod
     def load() -> "Settings":
@@ -133,6 +146,7 @@ class Settings:
             audio_bucket=_get("AUDIO_BUCKET"),
             audio_kms_key_id=_get("AUDIO_KMS_KEY_ID"),
             audio_url_ttl_s=_get_int("AUDIO_URL_TTL_S", 300),
+            generative_mode=_get_bool("GENERATIVE_MODE", False),
         )
 
 
