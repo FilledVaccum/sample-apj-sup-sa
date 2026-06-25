@@ -368,17 +368,12 @@ def cells() -> list[dict]:
             _fh.setFormatter(_fmt)
             _root.addHandler(_fh)
 
-            # StreamHandler so log messages also render in the Jupyter cell.
-            # Without this, adding the FileHandler above suppresses the implicit
-            # basicConfig() StreamHandler and live output disappears from cells.
-            # We target sys.__stdout__ (the real stdout) so this doesn't loop
-            # through the Tee (which would double-write to the file).
-            _sh = logging.StreamHandler(sys.__stdout__)
-            _sh._persist_run = True
-            _sh.setFormatter(_fmt)
-            _root.addHandler(_sh)
-
-            # Tee stdout/stderr so `print()` output is captured too.
+            # Tee stdout/stderr so `print()` output is captured to a file too.
+            # IMPORTANT: wrap the *current* sys.stdout (in Jupyter this is
+            # ipykernel's OutStream, which routes to the cell via iopub) — NOT
+            # sys.__stdout__ (the raw kernel-process fd, which never reaches the
+            # cell). Wrapping __stdout__ was a bug: print() then showed in the
+            # kernel log + file but vanished from the notebook cell.
             class _Tee:
                 def __init__(self, *streams):
                     self._streams = streams
@@ -393,12 +388,20 @@ def cells() -> list[dict]:
                     return False
             if not getattr(sys.stdout, "_persist_run", False):
                 _stdout_file = open(RUN_DIR / "stdout.log", "a", buffering=1)
-                _stdout_tee = _Tee(sys.__stdout__, _stdout_file)
+                _stdout_tee = _Tee(sys.stdout, _stdout_file)
                 _stdout_tee._persist_run = True
                 sys.stdout = _stdout_tee
-                _stderr_tee = _Tee(sys.__stderr__, _stdout_file)
+                _stderr_tee = _Tee(sys.stderr, _stdout_file)
                 _stderr_tee._persist_run = True
                 sys.stderr = _stderr_tee
+
+            # StreamHandler so log messages also render in the Jupyter cell.
+            # Point it at the live sys.stdout (the Tee installed above), so logs
+            # reach both the cell and stdout.log exactly once.
+            _sh = logging.StreamHandler(sys.stdout)
+            _sh._persist_run = True
+            _sh.setFormatter(_fmt)
+            _root.addHandler(_sh)
 
             # persist() — drop any result into RUN_DIR/stats/<name>.{json,csv}
             def persist(name: str, obj):
@@ -766,7 +769,42 @@ def cells() -> list[dict]:
         )),
 
         # --- 8. Download ---------------------------------------------------
-        md("## 8. Download outputs"),
+        md(dedent(
+            """\
+            ## 8. Download outputs
+
+            ### Where everything lands on disk
+
+            This notebook writes to two separate trees under `outputs/`
+            (relative to `PROJECT_ROOT`, i.e. the `batch/` dir — **one level up
+            from this `notebooks/` folder**):
+
+            ```
+            batch/outputs/
+            ├── <submission_id>/              ← THE ACTUAL MODEL OUTPUTS (this cell)
+            │   └── shard-0000/
+            │       ├── <input-file>.jsonl    ← one line per record: {id, response, usage, error}
+            │       │                            (the model's completion for each prompt)
+            │       └── _summary.json         ← per-shard token counts + wall-clock
+            │
+            └── _runs/<timestamp>/            ← this run's LOGS + ANALYSIS (sections 0.5, 8.5-8.9)
+                ├── run.log, stdout.log
+                └── stats/
+                    ├── 8_8_cost_estimate.json        ← actual AWS bill (per-instance)
+                    ├── 8_9_project_economics.json    ← $/1M tokens, total cost, real-world tok/s
+                    ├── 8_5_aggregate_throughput.json, 8_6_llmeter_stats.json, 8_7_real_world_wall_clock.json
+                    └── ... (5_* submission, 6_* final status)
+            ```
+
+            `outputs/_runs/latest` is a symlink to the most recent run. The
+            **dollar-per-million-token** figures are in
+            `stats/8_9_project_economics.json` (key `usd_per_1m_output_tokens`),
+            also printed inline by section 8.9 below.
+
+            > Tip: `outputs/` is git-ignored, so JupyterLab may hide it — enable
+            > **View → Show Hidden Files** if you don't see it in the file browser.
+            """
+        )),
         code(dedent(
             """\
             collect = download_outputs(
@@ -776,6 +814,8 @@ def cells() -> list[dict]:
             )
             print(f"downloaded {len(collect.files_downloaded)} files")
             print(f"local dir:  {collect.output_dir}")
+            print(f"  -> per-record model completions: {collect.output_dir}/shard-*/")
+            print(f"  -> cost + $/1M-token stats:      {RUN_DIR / 'stats'}/")
             collect.to_dataframe()
             """
         )),
