@@ -94,13 +94,20 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: c6i.xlarge
+    # Graviton (arm64) by default: m8g.xlarge has by far the widest capacity
+    # footprint in us-east-1 (all AZs, ~10x the free pool of c6i.xlarge), which
+    # avoids the "insufficient <type> capacity in <AZ>" launch failures we hit on
+    # real fresh-account events. The AMI below and the AWS CLI download in UserData
+    # resolve arm64 to match. If you change this to an x86 type, also flip the AMI
+    # SSM path (…-arm64 -> …-x86_64) — the UserData CLI download auto-detects arch.
+    Default: m8g.xlarge
     AllowedValues:
-      - t3.large
-      - t3.xlarge
-      - c6i.large
-      - c6i.xlarge
-      - c6i.2xlarge
+      - m8g.large
+      - m8g.xlarge
+      - m8g.2xlarge
+      - m7g.xlarge
+      - c8g.xlarge
+      - c7g.xlarge
 
   VolumeSize:
     Type: Number
@@ -404,7 +411,9 @@ Resources:
   CodeEditorInstance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      # arm64 AMI to match the Graviton InstanceType default (m8g). If you switch
+      # InstanceType to an x86 family, change arm64 -> x86_64 here.
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref CodeEditorInstanceProfile
       SubnetId: !Ref PublicSubnetId
@@ -442,9 +451,10 @@ Resources:
           dnf update -y -q
           dnf install -y -q unzip nginx jq git wget python3.11 python3.11-pip nodejs gcc make postgresql16
 
-          # AWS CLI v2
+          # AWS CLI v2 (arch-detected so this works on both arm64 and x86_64)
           cd /tmp
-          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          CLI_ARCH=$(uname -m)  # aarch64 on Graviton, x86_64 on Intel/AMD
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${!CLI_ARCH}.zip" -o awscliv2.zip
           unzip -q awscliv2.zip && ./aws/install --update && rm -rf awscliv2.zip aws/
 
           # Create user
