@@ -48,10 +48,41 @@ Conditions:
 
 Resources:
   #============================================================================
+  # Lake Formation data lake settings (deterministic fix for a fresh-account race)
+  #============================================================================
+  # Freshly-leased accounts are INCONSISTENT in their default Lake Formation
+  # mode. Some arrive in "Use only IAM access control" (Glue catalog governed by
+  # plain IAM — CreateDatabaseDefaultPermissions = ALL to IAM_ALLOWED_PRINCIPALS),
+  # and some arrive in pure Lake-Formation mode (no IAM_ALLOWED_PRINCIPALS grant).
+  # In the latter, `glue:CreateDatabase` fails the deploy with
+  #   "Insufficient Lake Formation permission(s): Required Create Database on Catalog"
+  # even though the deploy principal has glue:* via IAM. This is a non-deterministic
+  # capacity/propagation race we hit on real fresh accounts.
+  #
+  # This resource pins the account into the IAM-access-control mode that works,
+  # by asserting ALL -> IAM_ALLOWED_PRINCIPALS as the create-database/table default
+  # (the only values CloudFormation accepts here besides an empty array). GlueDatabase
+  # DependsOn this, so the setting is applied BEFORE the database is created.
+  # MutationType: APPEND so we never clobber any pre-existing data-lake admins.
+  LakeFormationSettings:
+    Type: AWS::LakeFormation::DataLakeSettings
+    Properties:
+      MutationType: APPEND
+      CreateDatabaseDefaultPermissions:
+        - Principal: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
+      CreateTableDefaultPermissions:
+        - Principal: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
+
+  #============================================================================
   # Glue Database
   #============================================================================
   GlueDatabase:
     Type: AWS::Glue::Database
+    DependsOn: LakeFormationSettings
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
