@@ -71,11 +71,41 @@ Parameters:
 
   PrivateSubnet1Id:
     Type: String
-    Description: Private subnet (NAT egress) for the runtime ENI
+    Description: (legacy) Aurora private subnet — no longer used by the Runtime; kept for compatibility
 
   PrivateSubnet2Id:
     Type: String
-    Description: Second private subnet (NAT egress) for the runtime ENI
+    Description: (legacy) Aurora private subnet — no longer used by the Runtime; kept for compatibility
+
+  # The voice Runtime runs in NetworkMode VPC and AgentCore Runtime only supports a
+  # subset of AZs (us-east-1: use1-az1/az2/az4). The Aurora private subnets land in
+  # !Select[0/1, GetAZs] = us-east-1a/1b; us-east-1a maps to use1-az6 (UNSUPPORTED) in
+  # many accounts, which fails Runtime creation. So this stack creates its OWN two
+  # subnets pinned by AvailabilityZoneId to supported AZs, attached to the existing
+  # NAT-routed private route table for egress.
+  PrivateRouteTableId:
+    Type: String
+    Description: Aurora private route table (default route -> NAT) to attach the voice subnets to
+
+  VoiceSubnet1Cidr:
+    Type: String
+    Default: 10.0.5.0/24
+    Description: CIDR for voice Runtime subnet 1 (must be free in the VPC and in a supported AZ)
+
+  VoiceSubnet2Cidr:
+    Type: String
+    Default: 10.0.6.0/24
+    Description: CIDR for voice Runtime subnet 2 (must be free in the VPC and in a supported AZ)
+
+  VoiceSubnet1AzId:
+    Type: String
+    Default: use1-az1
+    Description: AgentCore-supported AZ ID for voice subnet 1 (us-east-1 supported = use1-az1/az2/az4)
+
+  VoiceSubnet2AzId:
+    Type: String
+    Default: use1-az2
+    Description: AgentCore-supported AZ ID for voice subnet 2 (us-east-1 supported = use1-az1/az2/az4)
 
 Resources:
   #============================================================================
@@ -277,6 +307,46 @@ Resources:
       ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EnvironmentName}-voice-agent:latest
 
   #============================================================================
+  # Dedicated subnets in AgentCore-supported AZs (pinned by AvailabilityZoneId).
+  # The Aurora private subnets can't be used directly because PrivateSubnet1 lands in
+  # us-east-1a = use1-az6, which AgentCore Runtime does not support. These attach to
+  # the Aurora NAT-routed private route table so the Runtime keeps internet egress.
+  #============================================================================
+  VoiceSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZoneId: !Ref VoiceSubnet1AzId
+      CidrBlock: !Ref VoiceSubnet1Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-voice-subnet-1
+
+  VoiceSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZoneId: !Ref VoiceSubnet2AzId
+      CidrBlock: !Ref VoiceSubnet2Cidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-voice-subnet-2
+
+  VoiceSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableId
+      SubnetId: !Ref VoiceSubnet1
+
+  VoiceSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableId
+      SubnetId: !Ref VoiceSubnet2
+
+  #============================================================================
   # Security group for the runtime ENIs (egress only — TURN relays outbound)
   #============================================================================
   VoiceRuntimeSecurityGroup:
@@ -371,9 +441,11 @@ Resources:
       NetworkConfiguration:
         NetworkMode: VPC
         NetworkModeConfig:
+          # AgentCore-supported-AZ subnets created in this stack (NOT the Aurora
+          # PrivateSubnet1/2, which can land in an unsupported AZ like use1-az6).
           Subnets:
-            - !Ref PrivateSubnet1Id
-            - !Ref PrivateSubnet2Id
+            - !Ref VoiceSubnet1
+            - !Ref VoiceSubnet2
           SecurityGroups:
             - !GetAtt VoiceRuntimeSecurityGroup.GroupId
       # Same JWT-native inbound auth as the Strands runtime: the browser presents the

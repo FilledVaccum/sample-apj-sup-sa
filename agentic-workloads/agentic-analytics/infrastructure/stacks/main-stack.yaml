@@ -365,6 +365,10 @@ Resources:
         VpcId: !GetAtt AuroraStack.Outputs.VpcId
         PrivateSubnet1Id: !GetAtt AuroraStack.Outputs.PrivateSubnet1Id
         PrivateSubnet2Id: !GetAtt AuroraStack.Outputs.PrivateSubnet2Id
+        # The voice Runtime builds its own AgentCore-supported-AZ subnets and attaches
+        # them to this NAT-routed private route table (Aurora private subnets can land
+        # in an AgentCore-unsupported AZ like use1-az6).
+        PrivateRouteTableId: !GetAtt AuroraStack.Outputs.PrivateRouteTableId
       Tags:
         - Key: Project
           Value: !Ref EnvironmentName
