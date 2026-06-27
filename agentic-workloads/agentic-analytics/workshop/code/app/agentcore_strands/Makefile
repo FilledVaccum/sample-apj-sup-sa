@@ -64,6 +64,12 @@ SUBNET2          ?= $(lastword $(subst $(comma), ,$(SUBNET_IDS)))
 COGNITO_POOL     ?= $(call cfg,COGNITO_USER_POOL_ID)
 COGNITO_CLIENT   ?= $(call cfg,COGNITO_USER_LOGIN_CLIENT_ID)
 comma := ,
+# The voice Runtime builds its own AgentCore-supported-AZ subnets (the base private
+# subnets can land in an unsupported AZ like use1-az6). They attach to the base VPC's
+# NAT-routed private route table — discovered here from the VPC so no config.env change.
+PRIVATE_RT       ?= $(shell aws ec2 describe-route-tables --region $(REGION) \
+  --filters "Name=vpc-id,Values=$(VPC_ID)" "Name=tag:Name,Values=*private*" \
+  --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null)
 
 # ---- guards -----------------------------------------------------------------
 ifeq ($(strip $(REGION)),)
@@ -172,6 +178,7 @@ voice-deploy:
 	      VpcId=$(VPC_ID) \
 	      PrivateSubnet1Id=$(SUBNET1) \
 	      PrivateSubnet2Id=$(SUBNET2) \
+	      PrivateRouteTableId=$(PRIVATE_RT) \
 	  --capabilities CAPABILITY_NAMED_IAM \
 	  --region $(REGION); \
 	echo "==> [voice] done. Get the signaling URL with:"; \
