@@ -306,6 +306,10 @@ Outputs:
   KnowledgeBaseId:
     Description: Bedrock Knowledge Base ID
     Value: !GetAtt BedrockKBTrigger.KnowledgeBaseId
+    # NOTE: do not rename — imported by agentcore-topup-stack.yaml (workshop) as
+    # ${EnvironmentName}-KnowledgeBaseId. Renaming/removing breaks the import.
+    Export:
+      Name: !Sub ${EnvironmentName}-KnowledgeBaseId
 
   DataSourceId:
     Description: Bedrock Data Source ID

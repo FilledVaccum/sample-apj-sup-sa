@@ -33,8 +33,10 @@ LAMBDA_NAME = "semantic-layer-toolset-lambda"
 SECURITY_GROUP_ID = os.getenv("SECURITY_GROUP_ID")
 SUBNET_IDS = os.getenv("SUBNET_IDS", "").split(",")
 
-# Cube API secret — must match CUBEJS_API_SECRET in the Cube Docker container
-CUBE_API_SECRET = "cubejs-workshop-secret-2024"
+# Cube API secret — must match CUBEJS_API_SECRET in the Cube Docker container.
+# Read from the environment (same default as semantic_layer_toolset_lambda.py) so a
+# real deployment overrides it; the default is only the shared workshop dev value.
+CUBE_API_SECRET = os.getenv("CUBE_API_SECRET", "cubejs-workshop-secret-2024")  # nosec B105 - non-prod shared workshop default, overridable via env
 
 
 def get_cube_private_ip():

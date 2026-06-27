@@ -47,7 +47,12 @@ try:
     )
 except ImportError:
     print("Installing bedrock-agentcore-starter-toolkit...")
-    os.system(f"{sys.executable} -m pip install bedrock-agentcore-starter-toolkit -q")
+    # Use subprocess with an argument list (no shell) so there is no command
+    # injection surface — the args are fixed literals, not an interpolated string.
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install",
+        "bedrock-agentcore-starter-toolkit", "-q",
+    ])
     from bedrock_agentcore_starter_toolkit.operations.gateway.client import (
         GatewayClient, create_gateway_execution_role
     )
@@ -430,7 +435,11 @@ def deploy_runtime(gateway_url):
 
     # Try to extract runtime ARN from deploy stdout first.
     # The agentcore CLI output contains box-drawing characters (│, ╭, ╰, etc.)
-    # so we use a strict regex that only matches ARN-valid characters.
+    # and wraps long lines INSIDE the box border — so an ARN printed in a box can
+    # be split across visual lines, leaving the regex with only the pre-wrap
+    # fragment (e.g. ".../runtime/unicorn_rental_sema"). Accept the stdout match
+    # only if it ends with the full "<RUNTIME_AGENT_NAME>-<suffix>" id; otherwise
+    # fall through to the authoritative API lookup in _get_runtime_arn().
     import re
     runtime_arn = None
     if result.stdout:
@@ -438,19 +447,77 @@ def deploy_runtime(gateway_url):
             print(f"   {line}")
             match = re.search(r'(arn:aws:bedrock-agentcore:[a-zA-Z0-9\-]+:\d+:runtime/[a-zA-Z0-9_\-]+)', line)
             if match:
-                runtime_arn = match.group(1)
+                candidate = match.group(1)
+                # Guard against box-wrapped truncation: the runtime id must be
+                # the agent name PLUS the AgentCore-assigned "-XXXXXXXXXX" suffix.
+                rid = candidate.rsplit('/', 1)[-1]
+                if re.match(rf'^{re.escape(RUNTIME_AGENT_NAME)}-[A-Za-z0-9]+$', rid):
+                    runtime_arn = candidate
 
-    # Fallback: get ARN via agentcore list
+    # Fallback (also used when stdout only had a truncated/wrapped ARN): the
+    # authoritative source is the control-plane list, never the box-drawn stdout.
     if not runtime_arn:
         runtime_arn = _get_runtime_arn()
 
     if runtime_arn:
         save_semantic_config(SEMANTIC_RUNTIME_ARN=runtime_arn)
         print(f"[OK] Runtime ARN: {runtime_arn}")
+        # `agentcore configure/deploy` creates the runtime with the DEFAULT
+        # (IAM/SigV4) inbound auth — it has no flag for a JWT authorizer. The UI
+        # calls the runtime with a Cognito Bearer token, so without this the
+        # invoke fails 403 "Authorization method mismatch". Attach the same
+        # CustomJWTAuthorizer the analytics runtime uses, and allowlist the
+        # Authorization header so the agent receives the JWT for RBAC/RLS.
+        _attach_jwt_authorizer(runtime_arn.rsplit('/', 1)[-1])
     else:
         print("⚠️  Could not determine runtime ARN — UI may not connect to agent")
 
     return runtime_arn
+
+
+def _attach_jwt_authorizer(runtime_id):
+    """Switch the voice/semantic runtime from default IAM auth to CustomJWT.
+
+    update-agent-runtime REPLACES the whole config, so we re-send the runtime's
+    existing artifact/network/protocol/role unchanged and add the authorizer +
+    request-header allowlist (the same replace-trap the analytics `make build`
+    handles). Idempotent and safe to re-run.
+    """
+    pool_id = os.getenv('COGNITO_USER_POOL_ID')
+    client_id = os.getenv('COGNITO_USER_LOGIN_CLIENT_ID')
+    if not pool_id or not client_id:
+        print("⚠️  COGNITO_USER_POOL_ID / COGNITO_USER_LOGIN_CLIENT_ID missing — "
+              "skipping JWT authorizer attach (UI invoke would 403)")
+        return
+    discovery_url = (
+        f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}"
+        f"/.well-known/openid-configuration"
+    )
+    try:
+        agentcore = boto3.client('bedrock-agentcore-control', region_name=REGION)
+        rt = agentcore.get_agent_runtime(agentRuntimeId=runtime_id)
+        if rt.get('authorizerConfiguration', {}).get('customJWTAuthorizer'):
+            print("[OK] JWT authorizer already attached to runtime")
+            return
+        print(f"[voice/semantic] attaching CustomJWTAuthorizer to runtime {runtime_id}")
+        agentcore.update_agent_runtime(
+            agentRuntimeId=runtime_id,
+            roleArn=rt['roleArn'],
+            networkConfiguration=rt['networkConfiguration'],
+            protocolConfiguration=rt.get('protocolConfiguration', {'serverProtocol': 'HTTP'}),
+            agentRuntimeArtifact=rt['agentRuntimeArtifact'],
+            authorizerConfiguration={
+                'customJWTAuthorizer': {
+                    'discoveryUrl': discovery_url,
+                    'allowedClients': [client_id],
+                }
+            },
+            requestHeaderConfiguration={'requestHeaderAllowlist': ['Authorization']},
+        )
+        print("[OK] JWT authorizer + Authorization header allowlist attached")
+    except Exception as e:
+        print(f"⚠️  Could not attach JWT authorizer ({e}) — the UI invoke may 403; "
+              f"re-run this step or attach via update-agent-runtime")
 
 
 def _get_runtime_arn():
