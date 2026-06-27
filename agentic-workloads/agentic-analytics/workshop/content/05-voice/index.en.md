@@ -81,20 +81,37 @@ window.__APP_CONFIG__ = { VOICE_SIGNALING_URL: "https://xxxxxxxxxx.execute-api.u
 ::::expand{header="Using the Amplify-hosted UI instead? (if you did the optional Step 3.6)"}
 If you deployed the UI to **AWS Amplify** in [Step 3.6](../01-agent-and-infrastructure/03-connect-ui/) and have been using the `https://main.xxxxxxxxxxxxxx.amplifyapp.com` URL, editing the local `config.js` won't affect it — the Amplify build has its own bundled config. The voice client reads the same value from a **build-time** variable (`REACT_APP_VOICE_SIGNALING_URL`), so you just rebuild + redeploy the Amplify UI with that variable set.
 
-From the agent folder, write a small env file with the signaling URL and re-run the same Amplify deploy script you used in Step 3.6:
+From the agent folder, write an env file with the **full** set of build variables (the same ones Step 3.6 used **plus** the voice URL) and re-run the same Amplify deploy script. Pass the complete set — the build bakes exactly what's in this file into the bundle, so the agent runtime ARN and Cognito values must be present alongside the new voice URL, or the redeployed UI would lose its agent config:
 
 :::code{language=bash showCopyAction=true}
 cd /workshop/agentic-analytics/app/agentcore_strands
 
-# the VoiceSignalingUrl from the command above
-VOICE_URL=$(aws cloudformation describe-stacks --stack-name agentic-analytics-voice --region us-east-1 \
+REGION="us-east-1"
+AG_CONFIG="config.env"
+STACK="agentic-analytics-agentcore"   # the top-up stack from Step 2
+
+AGENT_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text)
+IDENTITY_POOL_ID=$(aws cloudformation describe-stacks --stack-name main-stack --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='IdentityPoolId'].OutputValue" --output text)
+VOICE_URL=$(aws cloudformation describe-stacks --stack-name agentic-analytics-voice --region "$REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='VoiceSignalingUrl'].OutputValue" --output text)
 
-printf 'REACT_APP_VOICE_SIGNALING_URL=%s\n' "$VOICE_URL" > /tmp/voice.env
-python3 ui/deploy_amplify_hosting.py --env-file /tmp/voice.env
+cat > /tmp/amplify.env << EOF
+REACT_APP_AWS_REGION=$REGION
+REACT_APP_AGENT_RUNTIME_ARN=$AGENT_ARN
+REACT_APP_COGNITO_USER_POOL_ID=$(grep COGNITO_USER_POOL_ID $AG_CONFIG | cut -d= -f2)
+REACT_APP_COGNITO_IDENTITY_POOL_ID=$IDENTITY_POOL_ID
+REACT_APP_COGNITO_USER_CLIENT_ID=$(grep COGNITO_USER_LOGIN_CLIENT_ID $AG_CONFIG | cut -d= -f2)
+REACT_APP_COGNITO_DOMAIN=$(grep COGNITO_DOMAIN $AG_CONFIG | cut -d= -f2)
+REACT_APP_VOICE_SIGNALING_URL=$VOICE_URL
+EOF
+
+cat /tmp/amplify.env   # sanity check: all 7 lines populated (no empty values)
+python3 ui/deploy_amplify_hosting.py --env-file /tmp/amplify.env
 :::
 
-The script rebuilds the React app with `REACT_APP_VOICE_SIGNALING_URL` baked in and redeploys to the **same** Amplify app, so your existing Amplify URL now shows the voice button. Open that URL (not localhost) and reload. Everything else in this step works identically — voice is UI-host-agnostic.
+The script rebuilds the React app with `REACT_APP_VOICE_SIGNALING_URL` (and the agent/Cognito config) baked in and redeploys to the **same** Amplify app, so your existing Amplify URL now shows the voice button. Open that URL (not localhost) and reload. Everything else in this step works identically — voice is UI-host-agnostic.
 
 ::alert[**CORS note:** the signaling proxy ships with `AllowedOrigin: '*'`, so it accepts requests from the Amplify origin out of the box. If you (or a later hardening step) restrict `AllowedOrigin`, set it to your Amplify URL and `make voice-deploy` again.]{type="info"}
 ::::
